@@ -2,7 +2,8 @@
 FROM alpine:3.20 AS xray-fetch
 RUN apk add --no-cache curl unzip ca-certificates
 RUN curl -fsSL -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip \
-    && unzip -q /tmp/xray.zip -d /out && chmod +x /out/xray \
+    && unzip -q /tmp/xray.zip -d /out \
+    && chmod +x /out/xray \
     && curl -fsSL -o /out/geosite.dat https://github.com/2dust/v2ray-rules-dat/releases/latest/download/geosite.dat
 FROM haproxy:2.9-alpine
 USER root
