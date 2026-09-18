@@ -18,19 +18,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # ------------------------------------------------------------------------
-# ACCESS GATE
-# Only SHA-256 hashes live in this file - never the plaintext password.
-# Generate a hash for a new password on your own machine (never on a
-# shared/public one) with:
-#     printf '%s' 'your-new-password' | sha256sum | cut -d' ' -f1
-# then paste ONLY the hash below and throw away the plaintext.
-#
-# This is a "don't run this by accident / don't let a casual passerby run
-# it" gate, not encryption - there is nothing to decrypt here, a hash is
-# one-way by design. The real risk to a hash like this isn't decryption,
-# it's brute force against a short/guessable password - use long, random
-# passwords if you want this to actually resist that. Real access control
 # still belongs in your cloud IAM / repo permissions, not a bash script.
+# ------------------------------------------------------------------------
 ALLOWED_HASHES=(
     "2c443ca329d2d85d093b80349ee88cc23169eaec1698dea050920836773fb7ad"
     "718052c0d0866bb03f23d3d4f2488f2aa86c435b9fd658abecbfc4c7abf2de47"
