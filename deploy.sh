@@ -35,7 +35,7 @@ ALLOWED_HASHES=(
     "2c443ca329d2d85d093b80349ee88cc23169eaec1698dea050920836773fb7ad"
     "718052c0d0866bb03f23d3d4f2488f2aa86c435b9fd658abecbfc4c7abf2de47"
     "57141b782821c05da2e2bcb1e2fa1253bce1a817c0d14f79bc899e1171ad7bb0"
-    ""  # slot 4 - paste a hash here, or leave blank to keep this slot unused
+    ""  # slot 4
     ""  # slot 5
     ""  # slot 6
     ""  # slot 7
