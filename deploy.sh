@@ -224,8 +224,47 @@ if [ "$PROXY_ENV" == "openresty" ]; then
     echo -e "  ${YELLOW}gRPC paths above will return 501 on OpenResty - see engine note.${RESET}"
 fi
 echo ""
+
+# ------------------------------------------------------------------------
+# CUSTOM DOMAIN (optional)
+# Cloud Run domain mappings work identically no matter which proxy engine
+# is inside the container - none of the six engine configs route on the
+# Host header, they all match any host on :8080 - so this is just wiring
+# your domain to the service, not a per-engine thing.
+# ------------------------------------------------------------------------
+echo -e "  ${CYAN}==================================================${RESET}"
+echo -e "  ${GREEN}             CUSTOM DOMAIN (OPTIONAL)${RESET}"
+echo -e "  ${CYAN}==================================================${RESET}"
+echo -e "  ${YELLOW}Requires: domain already verified for this GCP project${RESET}"
+echo -e "  ${YELLOW}(https://search.google.com/search-console -> Ownership verification,${RESET}"
+echo -e "  ${YELLOW}then linked under 'gcloud domains verify DOMAIN' / Cloud Console).${RESET}"
+echo ""
+read -r -p "$(echo -e "  ${CYAN}Domain to map (blank to skip): ${RESET}")" CUSTOM_DOMAIN
+
+FINAL_HOST="$CLEAN_HOST"
+if [ -n "$CUSTOM_DOMAIN" ]; then
+    echo -e "  ${CYAN}Creating domain mapping ${CUSTOM_DOMAIN} -> ${SERVICE_NAME} ...${RESET}"
+    if MAP_OUT=$(gcloud run domain-mappings create \
+            --service "$SERVICE_NAME" --domain "$CUSTOM_DOMAIN" \
+            --region "$REGION" --project="$PROJECT_ID" --quiet 2>&1); then
+        echo -e "  ${GREEN}Mapping created. Add these DNS records at your registrar/DNS host:${RESET}"
+        echo "$MAP_OUT" | grep -E 'NAME|rrdata|TYPE|---' || echo "$MAP_OUT"
+        echo ""
+        echo -e "  ${YELLOW}Google issues a managed TLS cert automatically once DNS resolves -${RESET}"
+        echo -e "  ${YELLOW}that can take anywhere from a few minutes to ~24h. Check status with:${RESET}"
+        echo -e "  ${GREEN}gcloud run domain-mappings describe --domain ${CUSTOM_DOMAIN} --region ${REGION} --project ${PROJECT_ID}${RESET}"
+        FINAL_HOST="$CUSTOM_DOMAIN"
+    else
+        echo -e "  ${RED}Domain mapping failed:${RESET}"
+        echo "$MAP_OUT"
+        echo -e "  ${YELLOW}Most common cause: the domain isn't verified for this project yet -${RESET}"
+        echo -e "  ${YELLOW}see the note above. Falling back to the raw Cloud Run host.${RESET}"
+    fi
+    echo ""
+fi
+
 echo -e "  ${CYAN}Generate client links / outbound JSON with:${RESET}"
-echo -e "  ${GREEN}./generate-client-links.sh ${CLEAN_HOST}${RESET}"
+echo -e "  ${GREEN}./generate-client-links.sh ${FINAL_HOST}${RESET}"
 echo ""
 
 rm -f build.log deploy.log
