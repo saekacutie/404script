@@ -25,7 +25,11 @@
         reverse_proxy 127.0.0.1:10001
     }
     handle /saeka-tojirp-xh* {
-        reverse_proxy 127.0.0.1:10002
+        reverse_proxy 127.0.0.1:10002 {
+            transport http {
+                versions h2c 2
+            }
+        }
     }
     handle /saeka-tojirp* {
         reverse_proxy 127.0.0.1:10000
@@ -43,7 +47,11 @@
         reverse_proxy 127.0.0.1:10004
     }
     handle /vmess-saeka-xh* {
-        reverse_proxy 127.0.0.1:10005
+        reverse_proxy 127.0.0.1:10005 {
+            transport http {
+                versions h2c 2
+            }
+        }
     }
     handle /vmess-saeka* {
         reverse_proxy 127.0.0.1:10003
@@ -61,7 +69,11 @@
         reverse_proxy 127.0.0.1:10007
     }
     handle /vless-saeka-xh* {
-        reverse_proxy 127.0.0.1:10008
+        reverse_proxy 127.0.0.1:10008 {
+            transport http {
+                versions h2c 2
+            }
+        }
     }
     handle /vless-saeka* {
         reverse_proxy 127.0.0.1:10006
@@ -79,7 +91,11 @@
         reverse_proxy 127.0.0.1:10010
     }
     handle /ss-saeka-xh* {
-        reverse_proxy 127.0.0.1:10011
+        reverse_proxy 127.0.0.1:10011 {
+            transport http {
+                versions h2c 2
+            }
+        }
     }
     handle /ss-saeka* {
         reverse_proxy 127.0.0.1:10009

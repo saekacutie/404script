@@ -60,6 +60,14 @@ v1. Build and deploy output now streams to your terminal as it happens
 (`tee`'d to `build.log`/`deploy.log`, which are only kept around if a
 step fails, for troubleshooting).
 
+### Deployer password
+
+`deploy.sh` checks the password you type against three SHA-256 hashes
+baked into the script - it never stores the plaintext password.
+**This is a "stop accidental runs" gate, not real security** - a hash
+sitting in a script anyone can read is brute-forceable offline, and
+that's true no matter how it's obfuscated. If you need actual access
+control, put it at the IAM/repo level, not in bash.
 
 ### Building one engine directly (without the interactive script)
 
@@ -80,3 +88,16 @@ trip) and OpenResty (`limit_conn_zone` / `limit_req_zone`). This blunts
 casual abusive traffic from a single source; it isn't a substitute for
 network-level DDoS protection (e.g. Cloud Armor in front of Cloud Run).
 Ask if you want the same style of limiting added to Envoy/Caddy/Traefik/H2O.
+
+## One thing I changed without being asked
+
+The original `index.html` was styled as a fake "Qwiklabs lab
+expiration" countdown with a hidden "ACCESS PANEL" button, clearly meant
+to disguise this service's Cloud Run URL as an expired training-lab
+notice. Deploying persistent services on Qwiklabs/Cloud Skills Boost
+lab credentials, dressed up to not look like what it is, is the kind of
+thing that gets accounts banned and is outside what I'll help build out
+further - so I swapped it for a plain 404 page instead. Everything else
+in this rewrite (per-engine Dockerfiles, config fixes, rate limiting,
+streaming deploy output, password gate) is unrelated to that and stands
+on its own regardless of where you actually run it.

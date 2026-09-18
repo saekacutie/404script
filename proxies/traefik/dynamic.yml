@@ -83,7 +83,7 @@ http:
         servers: [{url: "http://127.0.0.1:10001"}]
     trojan-xh-svc:
       loadBalancer:
-        servers: [{url: "http://127.0.0.1:10002"}]
+        servers: [{url: "h2c://127.0.0.1:10002"}]
     trojan-ws-svc:
       loadBalancer:
         servers: [{url: "http://127.0.0.1:10000"}]
@@ -96,7 +96,7 @@ http:
         servers: [{url: "http://127.0.0.1:10004"}]
     vmess-xh-svc:
       loadBalancer:
-        servers: [{url: "http://127.0.0.1:10005"}]
+        servers: [{url: "h2c://127.0.0.1:10005"}]
     vmess-ws-svc:
       loadBalancer:
         servers: [{url: "http://127.0.0.1:10003"}]
@@ -109,7 +109,7 @@ http:
         servers: [{url: "http://127.0.0.1:10007"}]
     vless-xh-svc:
       loadBalancer:
-        servers: [{url: "http://127.0.0.1:10008"}]
+        servers: [{url: "h2c://127.0.0.1:10008"}]
     vless-ws-svc:
       loadBalancer:
         servers: [{url: "http://127.0.0.1:10006"}]
@@ -122,7 +122,7 @@ http:
         servers: [{url: "http://127.0.0.1:10010"}]
     ss-xh-svc:
       loadBalancer:
-        servers: [{url: "http://127.0.0.1:10011"}]
+        servers: [{url: "h2c://127.0.0.1:10011"}]
     ss-ws-svc:
       loadBalancer:
         servers: [{url: "http://127.0.0.1:10009"}]
