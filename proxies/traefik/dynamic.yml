@@ -1,0 +1,128 @@
+http:
+  routers:
+    # --- TROJAN (higher priority = matched first; grpc/hu/xh before bare ws) ---
+    trojan-grpc:
+      rule: "PathPrefix(`/saeka-tojirp-grpc`)"
+      service: trojan-grpc-svc
+      priority: 100
+    trojan-hu:
+      rule: "PathPrefix(`/saeka-tojirp-hu`)"
+      service: trojan-hu-svc
+      priority: 90
+    trojan-xh:
+      rule: "PathPrefix(`/saeka-tojirp-xh`)"
+      service: trojan-xh-svc
+      priority: 90
+    trojan-ws:
+      rule: "PathPrefix(`/saeka-tojirp`)"
+      service: trojan-ws-svc
+      priority: 50
+
+    # --- VMESS ---
+    vmess-grpc:
+      rule: "PathPrefix(`/vmess-saeka-grpc`)"
+      service: vmess-grpc-svc
+      priority: 100
+    vmess-hu:
+      rule: "PathPrefix(`/vmess-saeka-hu`)"
+      service: vmess-hu-svc
+      priority: 90
+    vmess-xh:
+      rule: "PathPrefix(`/vmess-saeka-xh`)"
+      service: vmess-xh-svc
+      priority: 90
+    vmess-ws:
+      rule: "PathPrefix(`/vmess-saeka`)"
+      service: vmess-ws-svc
+      priority: 50
+
+    # --- VLESS ---
+    vless-grpc:
+      rule: "PathPrefix(`/vless-saeka-grpc`)"
+      service: vless-grpc-svc
+      priority: 100
+    vless-hu:
+      rule: "PathPrefix(`/vless-saeka-hu`)"
+      service: vless-hu-svc
+      priority: 90
+    vless-xh:
+      rule: "PathPrefix(`/vless-saeka-xh`)"
+      service: vless-xh-svc
+      priority: 90
+    vless-ws:
+      rule: "PathPrefix(`/vless-saeka`)"
+      service: vless-ws-svc
+      priority: 50
+
+    # --- SHADOWSOCKS ---
+    ss-grpc:
+      rule: "PathPrefix(`/ss-saeka-grpc`)"
+      service: ss-grpc-svc
+      priority: 100
+    ss-hu:
+      rule: "PathPrefix(`/ss-saeka-hu`)"
+      service: ss-hu-svc
+      priority: 90
+    ss-xh:
+      rule: "PathPrefix(`/ss-saeka-xh`)"
+      service: ss-xh-svc
+      priority: 90
+    ss-ws:
+      rule: "PathPrefix(`/ss-saeka`)"
+      service: ss-ws-svc
+      priority: 50
+
+  services:
+    # gRPC backends use the h2c:// scheme so Traefik speaks cleartext
+    # HTTP/2 to Xray's gRPC inbound instead of HTTP/1.1.
+    trojan-grpc-svc:
+      loadBalancer:
+        servers: [{url: "h2c://127.0.0.1:10012"}]
+    trojan-hu-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10001"}]
+    trojan-xh-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10002"}]
+    trojan-ws-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10000"}]
+
+    vmess-grpc-svc:
+      loadBalancer:
+        servers: [{url: "h2c://127.0.0.1:10013"}]
+    vmess-hu-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10004"}]
+    vmess-xh-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10005"}]
+    vmess-ws-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10003"}]
+
+    vless-grpc-svc:
+      loadBalancer:
+        servers: [{url: "h2c://127.0.0.1:10014"}]
+    vless-hu-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10007"}]
+    vless-xh-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10008"}]
+    vless-ws-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10006"}]
+
+    ss-grpc-svc:
+      loadBalancer:
+        servers: [{url: "h2c://127.0.0.1:10015"}]
+    ss-hu-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10010"}]
+    ss-xh-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10011"}]
+    ss-ws-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10009"}]

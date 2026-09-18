@@ -1,0 +1,92 @@
+{
+    admin off
+    auto_https off
+    servers {
+        # Enables cleartext HTTP/2 (h2c) alongside HTTP/1.1 on the same
+        # listener - this is the piece nginx structurally cannot do.
+        protocols h1 h2c
+    }
+}
+
+:8080 {
+    handle /health {
+        respond "OK" 200
+    }
+
+    # --- TROJAN (longest/most specific prefixes first) ---
+    handle /saeka-tojirp-grpc* {
+        reverse_proxy 127.0.0.1:10012 {
+            transport http {
+                versions h2c 2
+            }
+        }
+    }
+    handle /saeka-tojirp-hu* {
+        reverse_proxy 127.0.0.1:10001
+    }
+    handle /saeka-tojirp-xh* {
+        reverse_proxy 127.0.0.1:10002
+    }
+    handle /saeka-tojirp* {
+        reverse_proxy 127.0.0.1:10000
+    }
+
+    # --- VMESS ---
+    handle /vmess-saeka-grpc* {
+        reverse_proxy 127.0.0.1:10013 {
+            transport http {
+                versions h2c 2
+            }
+        }
+    }
+    handle /vmess-saeka-hu* {
+        reverse_proxy 127.0.0.1:10004
+    }
+    handle /vmess-saeka-xh* {
+        reverse_proxy 127.0.0.1:10005
+    }
+    handle /vmess-saeka* {
+        reverse_proxy 127.0.0.1:10003
+    }
+
+    # --- VLESS ---
+    handle /vless-saeka-grpc* {
+        reverse_proxy 127.0.0.1:10014 {
+            transport http {
+                versions h2c 2
+            }
+        }
+    }
+    handle /vless-saeka-hu* {
+        reverse_proxy 127.0.0.1:10007
+    }
+    handle /vless-saeka-xh* {
+        reverse_proxy 127.0.0.1:10008
+    }
+    handle /vless-saeka* {
+        reverse_proxy 127.0.0.1:10006
+    }
+
+    # --- SHADOWSOCKS ---
+    handle /ss-saeka-grpc* {
+        reverse_proxy 127.0.0.1:10015 {
+            transport http {
+                versions h2c 2
+            }
+        }
+    }
+    handle /ss-saeka-hu* {
+        reverse_proxy 127.0.0.1:10010
+    }
+    handle /ss-saeka-xh* {
+        reverse_proxy 127.0.0.1:10011
+    }
+    handle /ss-saeka* {
+        reverse_proxy 127.0.0.1:10009
+    }
+
+    handle {
+        root * /var/www/html
+        file_server
+    }
+}
