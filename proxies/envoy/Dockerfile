@@ -1,14 +1,12 @@
 # docker build -f proxies/envoy/Dockerfile -t IMAGE .
-# Envoy needs glibc, so this engine uses debian-slim instead of Alpine/musl
-# (every other engine here is Alpine) - and debian-slim instead of the
-# official envoyproxy/envoy image, which is Ubuntu-based. Only envoy +
-# its own apt repo get installed, nothing else.
 FROM alpine:3.20 AS xray-fetch
 RUN apk add --no-cache curl unzip ca-certificates
 RUN curl -fsSL -o /tmp/xray.zip \
         https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip \
     && unzip -q /tmp/xray.zip -d /out \
-    && chmod +x /out/xray
+    && chmod +x /out/xray \
+    && curl -fsSL -o /out/geosite.dat \
+        https://github.com/2dust/v2ray-rules-dat/releases/latest/download/geosite.dat
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -19,14 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends envoy \
     && apt-get purge -y gnupg && apt-get autoremove -y \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
-
 COPY --from=xray-fetch /out/xray /usr/local/bin/xray
-RUN mkdir -p /etc/xray /etc/envoy
-COPY common/config-ads.json   /etc/xray/config-ads.json
+COPY --from=xray-fetch /out/geosite.dat /usr/local/share/xray/geosite.dat
+RUN mkdir -p /etc/xray /etc/envoy /usr/local/share/xray
+COPY common/config-ads.json /etc/xray/config-ads.json
 COPY common/config-noads.json /etc/xray/config-noads.json
+COPY common/ads-mode.sh /ads-mode.sh
 COPY proxies/envoy/envoy.yaml /etc/envoy/envoy.yaml
 COPY proxies/envoy/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
+RUN chmod +x /entrypoint.sh /ads-mode.sh
 EXPOSE 8080
 ENTRYPOINT ["/entrypoint.sh"]
