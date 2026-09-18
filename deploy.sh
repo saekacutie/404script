@@ -19,17 +19,29 @@ cd "$SCRIPT_DIR"
 
 # ------------------------------------------------------------------------
 # ACCESS GATE
-# Passwords are never stored in plaintext in this script - only their
-# SHA-256 hashes. That stops a casual `cat deploy.sh` or `strings` from
-# recovering the password, but it is NOT real security: anyone with the
-# file can brute-force short passwords against the hash offline, and a
-# hash in a public script is not a secret. Treat this as a "don't run
-# this by accident" gate, not encryption - real access control belongs
-# in your cloud IAM / repo permissions, not a bash script.
+# Only SHA-256 hashes live in this file - never the plaintext password.
+# Generate a hash for a new password on your own machine (never on a
+# shared/public one) with:
+#     printf '%s' 'your-new-password' | sha256sum | cut -d' ' -f1
+# then paste ONLY the hash below and throw away the plaintext.
+#
+# This is a "don't run this by accident / don't let a casual passerby run
+# it" gate, not encryption - there is nothing to decrypt here, a hash is
+# one-way by design. The real risk to a hash like this isn't decryption,
+# it's brute force against a short/guessable password - use long, random
+# passwords if you want this to actually resist that. Real access control
+# still belongs in your cloud IAM / repo permissions, not a bash script.
 ALLOWED_HASHES=(
-    "$(printf '%s' 'saeka404'   | sha256sum | cut -d' ' -f1)"
-    "$(printf '%s' 'prvtspyyy'  | sha256sum | cut -d' ' -f1)"
-    "$(printf '%s' 'scriptmaker'| sha256sum | cut -d' ' -f1)"
+    "2c443ca329d2d85d093b80349ee88cc23169eaec1698dea050920836773fb7ad"
+    "718052c0d0866bb03f23d3d4f2488f2aa86c435b9fd658abecbfc4c7abf2de47"
+    "57141b782821c05da2e2bcb1e2fa1253bce1a817c0d14f79bc899e1171ad7bb0"
+    ""  # slot 4 - paste a hash here, or leave blank to keep this slot unused
+    ""  # slot 5
+    ""  # slot 6
+    ""  # slot 7
+    ""  # slot 8
+    ""  # slot 9
+    ""  # slot 10
 )
 MAX_ATTEMPTS=3
 authorized=0
@@ -38,6 +50,7 @@ for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
     echo ""
     INPUT_HASH=$(printf '%s' "$INPUT_PW" | sha256sum | cut -d' ' -f1)
     for h in "${ALLOWED_HASHES[@]}"; do
+        [ -z "$h" ] && continue   # skip empty/unused slots
         if [ "$INPUT_HASH" == "$h" ]; then
             authorized=1
             break 2
@@ -161,8 +174,13 @@ images:
   - 'gcr.io/${PROJECT_ID}/${IMAGE_TAG}'
 YAML
 
-echo -e "  ${CYAN}Building ${ENGINE} image (streaming live build output)...${RESET}"
-if ! gcloud builds submit . --config "$CB_CONFIG" --project="$PROJECT_ID" 2>&1 | tee build.log; then
+# gcloud's own boilerplate (archive/tarball-upload/build-created/log-URL/
+
+QUIET_FILTER='^(Creating temporary archive|Uploading tarball|Created \[|Logs are available at|Waiting for build to complete)'
+
+echo -e "  ${CYAN}Building ${ENGINE} image...${RESET}"
+if ! gcloud builds submit . --config "$CB_CONFIG" --project="$PROJECT_ID" 2>&1 \
+        | tee build.log | sed -E "/${QUIET_FILTER}/d"; then
     echo -e "  ${RED}BUILD FAILED. Last 30 log lines:${RESET}"
     tail -n 30 build.log
     rm -f "$CB_CONFIG"
@@ -182,12 +200,12 @@ deploy_attempt() {
         --max-instances "$maxi" \
         --timeout 3600 --allow-unauthenticated --project="$PROJECT_ID" \
         --set-env-vars "ADS_MODE=${ADS_MODE}" \
-        --quiet "$@" 2>&1 | tee deploy.log
+        --quiet "$@" 2>&1 | tee deploy.log | sed -E "/${QUIET_FILTER}/d"
     return "${PIPESTATUS[0]}"
 }
 
 echo ""
-echo -e "  ${CYAN}Deploying to Cloud Run in ${REGION} (streaming live deploy output)...${RESET}"
+echo -e "  ${CYAN}Deploying to Cloud Run in ${REGION}...${RESET}"
 if deploy_attempt "$CPU" "$RAM" "$MAX_INSTANCES" --concurrency 1000 --cpu-boost --no-cpu-throttling --min-instances 1; then
     DEPLOY_NOTE="full stability tuning (always-on CPU)"
 elif deploy_attempt 1 2Gi 2 --concurrency 500 --no-cpu-throttling --min-instances 1; then
@@ -225,13 +243,9 @@ if [ "$PROXY_ENV" == "openresty" ]; then
 fi
 echo ""
 
-# ------------------------------------------------------------------------
+# ----------------
 # CUSTOM DOMAIN (optional)
-# Cloud Run domain mappings work identically no matter which proxy engine
-# is inside the container - none of the six engine configs route on the
-# Host header, they all match any host on :8080 - so this is just wiring
-# your domain to the service, not a per-engine thing.
-# ------------------------------------------------------------------------
+#-----------------
 echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${GREEN}             CUSTOM DOMAIN (OPTIONAL)${RESET}"
 echo -e "  ${CYAN}==================================================${RESET}"
