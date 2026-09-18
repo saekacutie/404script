@@ -18,6 +18,103 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # ------------------------------------------------------------------------
+# TERMINAL LAYOUT HELPERS
+# Everything below is used to render the access screen as a centered
+# "page" in the terminal: a bordered box, a random greeting drawn from a
+# 100-entry pool (10 openers x 10 closers), a short feature summary, and
+# a centered password prompt. Purely cosmetic - the auth logic itself is
+# unchanged from v1/v2.
+# ------------------------------------------------------------------------
+TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
+case "$TERM_WIDTH" in ''|*[!0-9]*) TERM_WIDTH=80;; esac
+[ "$TERM_WIDTH" -lt 40 ] && TERM_WIDTH=80
+
+BOX_WIDTH=64
+[ "$BOX_WIDTH" -gt $((TERM_WIDTH - 2)) ] && BOX_WIDTH=$((TERM_WIDTH - 2))
+BOX_INNER=$((BOX_WIDTH - 4))
+BOX_PAD=$(( (TERM_WIDTH - BOX_WIDTH) / 2 ))
+[ "$BOX_PAD" -lt 0 ] && BOX_PAD=0
+BPAD="$(printf '%*s' "$BOX_PAD" '')"
+HRULE="$(printf '─%.0s' $(seq 1 $((BOX_WIDTH - 2))))"
+
+# Center a single plain-text line (no color codes counted in width).
+center_line() {
+    local text="$1" color="${2:-}"
+    local pad=$(( (TERM_WIDTH - ${#text}) / 2 ))
+    [ "$pad" -lt 0 ] && pad=0
+    if [ -n "$color" ]; then
+        printf "%*s${color}%s${RESET}\n" "$pad" "" "$text"
+    else
+        printf "%*s%s\n" "$pad" "" "$text"
+    fi
+}
+
+box_top()    { printf "%s${CYAN}┌%s┐${RESET}\n" "$BPAD" "$HRULE"; }
+box_bottom() { printf "%s${CYAN}└%s┘${RESET}\n" "$BPAD" "$HRULE"; }
+box_sep()    { printf "%s${CYAN}├%s┤${RESET}\n" "$BPAD" "$HRULE"; }
+box_blank()  { printf "%s${CYAN}│${RESET}%*s${CYAN}│${RESET}\n" "$BPAD" "$((BOX_WIDTH - 2))" ""; }
+
+# Content-centered line inside the box. $1 = plain text, $2 = optional color.
+box_line() {
+    local content="$1" color="${2:-}"
+    local clen=${#content}
+    [ "$clen" -gt "$BOX_INNER" ] && content="${content:0:$BOX_INNER}" && clen=$BOX_INNER
+    local lpad=$(( (BOX_INNER - clen) / 2 ))
+    [ "$lpad" -lt 0 ] && lpad=0
+    local rpad=$(( BOX_INNER - clen - lpad ))
+    if [ -n "$color" ]; then
+        printf "%s${CYAN}│${RESET} %*s${color}%s${RESET}%*s ${CYAN}│${RESET}\n" \
+            "$BPAD" "$lpad" "" "$content" "$rpad" ""
+    else
+        printf "%s${CYAN}│${RESET} %*s%s%*s ${CYAN}│${RESET}\n" \
+            "$BPAD" "$lpad" "" "$content" "$rpad" ""
+    fi
+}
+
+# ------------------------------------------------------------------------
+# GREETING POOL - 10 openers x 10 closers = exactly 100 combinations,
+# picked at random each run.
+# ------------------------------------------------------------------------
+GREET_OPEN=(
+    "Welcome back,"     "Good to see you,"   "Hello again,"      "Systems nominal,"
+    "Standing by,"      "Greetings,"         "All clear,"        "Access point live,"
+    "Terminal awake,"   "Ready when you are,"
+)
+GREET_CLOSE=(
+    "operator."         "commander."         "engineer."         "deployer."
+    "let's ship something." "the grid awaits."  "your keys, please." "time to deploy."
+    "stay sharp."       "no rush."
+)
+GREET_IDX=$(( RANDOM % 100 ))
+GREETING="${GREET_OPEN[$(( GREET_IDX / 10 ))]} ${GREET_CLOSE[$(( GREET_IDX % 10 ))]}"
+
+render_gate_screen() {
+    clear
+    echo ""
+    center_line "4N1 FAST DEPLOYER v2" "${BOLD}${WHITE}"
+    center_line "engineered by saeka tojirp" "${MAGENTA}"
+    echo ""
+    box_top
+    box_line "$GREETING" "${GREEN}"
+    box_sep
+    box_line "PURPOSE" "${BOLD}${CYAN}"
+    box_line "Cloud Run reverse-proxy deployer"
+    box_line "for VLESS / VMess / Trojan / Shadowsocks"
+    box_blank
+    box_line "SUPPORTED PROXY ENGINES" "${BOLD}${CYAN}"
+    box_line "HAProxy · Envoy · Caddy · H2O · Traefik · OpenResty"
+    box_blank
+    box_line "SUPPORTED TRANSPORTS" "${BOLD}${CYAN}"
+    box_line "WebSocket · HTTPUpgrade · XHTTP · gRPC*"
+    box_line "(*gRPC unsupported on OpenResty)" "${YELLOW}"
+    box_blank
+    box_line "This tool provisions real GCP billing resources." "${YELLOW}"
+    box_line "Authorized use only." "${YELLOW}"
+    box_bottom
+    echo ""
+}
+
+# ------------------------------------------------------------------------
 # ACCESS GATE
 # Only SHA-256 hashes live in this file - never the plaintext password.
 # Generate a hash for a new password on your own machine (never on a
@@ -45,8 +142,11 @@ ALLOWED_HASHES=(
 )
 MAX_ATTEMPTS=3
 authorized=0
+
+render_gate_screen
 for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
-    read -r -s -p "$(echo -e "  ${CYAN}DEPLOYER PASSWORD: ${RESET}")" INPUT_PW
+    printf "%s" "$BPAD"
+    read -r -s -p "$(echo -e "  ${CYAN}${BOLD}ENTER PASSWORD ›${RESET} ")" INPUT_PW
     echo ""
     INPUT_HASH=$(printf '%s' "$INPUT_PW" | sha256sum | cut -d' ' -f1)
     for h in "${ALLOWED_HASHES[@]}"; do
@@ -56,15 +156,21 @@ for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
             break 2
         fi
     done
-    echo -e "  ${RED}Incorrect password (${attempt}/${MAX_ATTEMPTS}).${RESET}"
+    echo ""
+    center_line "Incorrect password (${attempt}/${MAX_ATTEMPTS})." "${RED}"
+    echo ""
 done
 if [ "$authorized" -ne 1 ]; then
-    echo -e "  ${RED}Access denied.${RESET}"
+    echo ""
+    center_line "ACCESS DENIED" "${BOLD}${RED}"
+    echo ""
     exit 1
 fi
-
 clear
 echo ""
+center_line "ACCESS GRANTED" "${BOLD}${GREEN}"
+echo ""
+
 echo -e "  ${BOLD}${WHITE}4N1 FAST DEPLOYER v2 (PER-ENGINE)${RESET}"
 echo -e "  ${MAGENTA}ENGINEERED BY SAEKA TOJIRP${RESET}"
 echo ""
