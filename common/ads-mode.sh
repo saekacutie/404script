@@ -1,7 +1,7 @@
 #!/bin/bash
-# Build and validate the Xray profile used by every proxy engine.
-# Domain blocking is enforced in routing (not only DNS hosts), so proxied
-# requests to matching ad/tracker domains reach the blackhole outbound.
+# Shared Xray ad policy loader for every proxy engine.
+# ADS_MODE=ads disables blocking. ADS_MODE=noads enables the selected policy.
+# ADS_LEVEL: light, standard, strict, extreme.
 set -euo pipefail
 
 ADS_MODE="${ADS_MODE:-noads}"
@@ -16,32 +16,20 @@ case "$ADS_MODE" in
   noads)
     cp /etc/xray/config-noads.json "$CONFIG"
     case "$ADS_LEVEL" in
-      light)
-        DOMAINS='"geosite:category-ads"'
-        ;;
-      standard)
-        DOMAINS='"geosite:category-ads-all"'
-        ;;
-      strict)
-        DOMAINS='"geosite:category-ads-all","geosite:category-tracking"'
-        ;;
-      extreme)
-        # Keep the extreme profile focused on ad/tracker families. Blocking
-        # malware/phishing here would be a different security policy and can
-        # unexpectedly deny legitimate security and update endpoints.
-        DOMAINS='"geosite:category-ads-all","geosite:category-tracking"'
-        ;;
+      light)    DOMAINS='"geosite:category-ads"' ;;
+      standard) DOMAINS='"geosite:category-ads-all"' ;;
+      strict)   DOMAINS='"geosite:category-ads-all","geosite:category-tracking"' ;;
+      extreme)  DOMAINS='"geosite:category-ads-all","geosite:category-tracking","geosite:category-social"' ;;
       *)
-        echo "[!] Unknown ADS_LEVEL=$ADS_LEVEL; using standard" >&2
+        echo "[!] Invalid ADS_LEVEL=$ADS_LEVEL; using standard" >&2
         ADS_LEVEL=standard
         DOMAINS='"geosite:category-ads-all"'
         ;;
     esac
-    # Shadowsocks entries in the legacy profiles lacked sniffing, so add it
-    # before the settings property. This is idempotent because the source is
-    # copied fresh on every start.
+    # Add sniffing to Shadowsocks in the legacy template so Xray can identify
+    # the destination domain for those inbound transports as well.
     sed -i -E '/"tag": "ss-(ws|hu|xh|grpc)",/a\        "sniffing": {"enabled": true, "destOverride": ["http", "tls"]},' "$CONFIG"
-    # Insert the block rule before the existing direct catch-all rule.
+    # This is deliberately inserted before the existing direct rule.
     sed -i "s|\"rules\": \[|\"rules\": [{\"type\":\"field\",\"domain\":[$DOMAINS],\"outboundTag\":\"block\"},|" "$CONFIG"
     ;;
   *)
@@ -51,10 +39,7 @@ case "$ADS_MODE" in
 esac
 
 export XRAY_LOCATION_ASSET="$ASSET_DIR"
-# Validate both JSON structure and Xray-specific routing/assets before launch.
-if ! command -v xray >/dev/null 2>&1; then
-  echo "[!] xray is not installed" >&2
-  exit 127
-fi
+command -v xray >/dev/null 2>&1 || { echo '[!] xray is not installed' >&2; exit 127; }
+# Validate generated JSON, routing order, and geosite references before launch.
 xray run -test -config "$CONFIG"
 echo "[+] Ads mode: $ADS_MODE (level: ${ADS_LEVEL:-off})"
