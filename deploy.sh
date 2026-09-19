@@ -18,6 +18,103 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # ------------------------------------------------------------------------
+# TERMINAL LAYOUT HELPERS
+# Everything below is used to render the access screen as a centered
+# "page" in the terminal: a bordered box, a random greeting drawn from a
+# 100-entry pool (10 openers x 10 closers), a short feature summary, and
+# a centered password prompt. Purely cosmetic - the auth logic itself is
+# unchanged from v1/v2.
+# ------------------------------------------------------------------------
+TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
+case "$TERM_WIDTH" in ''|*[!0-9]*) TERM_WIDTH=80;; esac
+[ "$TERM_WIDTH" -lt 40 ] && TERM_WIDTH=80
+
+BOX_WIDTH=64
+[ "$BOX_WIDTH" -gt $((TERM_WIDTH - 2)) ] && BOX_WIDTH=$((TERM_WIDTH - 2))
+BOX_INNER=$((BOX_WIDTH - 4))
+BOX_PAD=$(( (TERM_WIDTH - BOX_WIDTH) / 2 ))
+[ "$BOX_PAD" -lt 0 ] && BOX_PAD=0
+BPAD="$(printf '%*s' "$BOX_PAD" '')"
+HRULE="$(printf '─%.0s' $(seq 1 $((BOX_WIDTH - 2))))"
+
+# Center a single plain-text line (no color codes counted in width).
+center_line() {
+    local text="$1" color="${2:-}"
+    local pad=$(( (TERM_WIDTH - ${#text}) / 2 ))
+    [ "$pad" -lt 0 ] && pad=0
+    if [ -n "$color" ]; then
+        printf "%*s${color}%s${RESET}\n" "$pad" "" "$text"
+    else
+        printf "%*s%s\n" "$pad" "" "$text"
+    fi
+}
+
+box_top()    { printf "%s${CYAN}┌%s┐${RESET}\n" "$BPAD" "$HRULE"; }
+box_bottom() { printf "%s${CYAN}└%s┘${RESET}\n" "$BPAD" "$HRULE"; }
+box_sep()    { printf "%s${CYAN}├%s┤${RESET}\n" "$BPAD" "$HRULE"; }
+box_blank()  { printf "%s${CYAN}│${RESET}%*s${CYAN}│${RESET}\n" "$BPAD" "$((BOX_WIDTH - 2))" ""; }
+
+# Content-centered line inside the box. $1 = plain text, $2 = optional color.
+box_line() {
+    local content="$1" color="${2:-}"
+    local clen=${#content}
+    [ "$clen" -gt "$BOX_INNER" ] && content="${content:0:$BOX_INNER}" && clen=$BOX_INNER
+    local lpad=$(( (BOX_INNER - clen) / 2 ))
+    [ "$lpad" -lt 0 ] && lpad=0
+    local rpad=$(( BOX_INNER - clen - lpad ))
+    if [ -n "$color" ]; then
+        printf "%s${CYAN}│${RESET} %*s${color}%s${RESET}%*s ${CYAN}│${RESET}\n" \
+            "$BPAD" "$lpad" "" "$content" "$rpad" ""
+    else
+        printf "%s${CYAN}│${RESET} %*s%s%*s ${CYAN}│${RESET}\n" \
+            "$BPAD" "$lpad" "" "$content" "$rpad" ""
+    fi
+}
+
+# ------------------------------------------------------------------------
+# GREETING POOL - 10 openers x 10 closers = exactly 100 combinations,
+# picked at random each run.
+# ------------------------------------------------------------------------
+GREET_OPEN=(
+    "Welcome back,"     "Good to see you,"   "Hello again,"      "Systems nominal,"
+    "Standing by,"      "Greetings,"         "All clear,"        "Access point live,"
+    "Terminal awake,"   "Ready when you are,"
+)
+GREET_CLOSE=(
+    "operator."         "commander."         "engineer."         "deployer."
+    "let's ship something." "the grid awaits."  "your keys, please." "time to deploy."
+    "stay sharp."       "no rush."
+)
+GREET_IDX=$(( RANDOM % 100 ))
+GREETING="${GREET_OPEN[$(( GREET_IDX / 10 ))]} ${GREET_CLOSE[$(( GREET_IDX % 10 ))]}"
+
+render_gate_screen() {
+    clear
+    echo ""
+    center_line "4N1 FAST DEPLOYER v2" "${BOLD}${WHITE}"
+    center_line "engineered by saeka tojirp" "${MAGENTA}"
+    echo ""
+    box_top
+    box_line "$GREETING" "${GREEN}"
+    box_sep
+    box_line "PURPOSE" "${BOLD}${CYAN}"
+    box_line "Cloud Run reverse-proxy deployer"
+    box_line "for VLESS / VMess / Trojan / Shadowsocks"
+    box_blank
+    box_line "SUPPORTED PROXY ENGINES" "${BOLD}${CYAN}"
+    box_line "HAProxy · Envoy · Caddy · Traefik · OpenResty"
+    box_blank
+    box_line "SUPPORTED TRANSPORTS" "${BOLD}${CYAN}"
+    box_line "WebSocket · HTTPUpgrade · XHTTP · gRPC*"
+    box_line "(*gRPC unsupported on OpenResty)" "${YELLOW}"
+    box_blank
+    box_line "This tool provisions real GCP billing resources." "${YELLOW}"
+    box_line "Authorized use only." "${YELLOW}"
+    box_bottom
+    echo ""
+}
+
+# ------------------------------------------------------------------------
 # ACCESS GATE
 # Only SHA-256 hashes live in this file - never the plaintext password.
 # Generate a hash for a new password on your own machine (never on a
@@ -45,8 +142,11 @@ ALLOWED_HASHES=(
 )
 MAX_ATTEMPTS=3
 authorized=0
+
+render_gate_screen
 for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
-    read -r -s -p "$(echo -e "  ${CYAN}DEPLOYER PASSWORD: ${RESET}")" INPUT_PW
+    printf "%s" "$BPAD"
+    read -r -s -p "$(echo -e "  ${CYAN}${BOLD}ENTER PASSWORD ›${RESET} ")" INPUT_PW
     echo ""
     INPUT_HASH=$(printf '%s' "$INPUT_PW" | sha256sum | cut -d' ' -f1)
     for h in "${ALLOWED_HASHES[@]}"; do
@@ -56,15 +156,21 @@ for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
             break 2
         fi
     done
-    echo -e "  ${RED}Incorrect password (${attempt}/${MAX_ATTEMPTS}).${RESET}"
+    echo ""
+    center_line "Incorrect password (${attempt}/${MAX_ATTEMPTS})." "${RED}"
+    echo ""
 done
 if [ "$authorized" -ne 1 ]; then
-    echo -e "  ${RED}Access denied.${RESET}"
+    echo ""
+    center_line "ACCESS DENIED" "${BOLD}${RED}"
+    echo ""
     exit 1
 fi
-
 clear
 echo ""
+center_line "ACCESS GRANTED" "${BOLD}${GREEN}"
+echo ""
+
 echo -e "  ${BOLD}${WHITE}4N1 FAST DEPLOYER v2 (PER-ENGINE)${RESET}"
 echo -e "  ${MAGENTA}ENGINEERED BY SAEKA TOJIRP${RESET}"
 echo ""
@@ -80,21 +186,19 @@ echo ""
 echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${GREEN}             CHOOSE PROXY ENGINE${RESET}"
 echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${YELLOW}1) HAProxy    - WS/HU/XHTTP always; gRPC+H2 need --use-http2 redeploy (see note)${RESET}"
-echo -e "  ${YELLOW}2) Envoy      - full protocol support incl. gRPC+H2, all on one port${RESET}"
-echo -e "  ${YELLOW}3) Caddy      - full protocol support incl. gRPC+H2, all on one port${RESET}"
-echo -e "  ${YELLOW}4) H2O        - full protocol support incl. gRPC+H2 (least tested)${RESET}"
-echo -e "  ${YELLOW}5) Traefik    - full protocol support incl. gRPC+H2 (less tested)${RESET}"
-echo -e "  ${YELLOW}6) OpenResty  - WS/HU/XHTTP only, NO gRPC/H2 (nginx limitation)${RESET}"
+echo -e "  ${YELLOW}1) HAProxy    - full protocol support incl. gRPC (recommended)${RESET}"
+echo -e "  ${YELLOW}2) Envoy      - full protocol support incl. gRPC (fast & stable)${RESET}"
+echo -e "  ${YELLOW}3) Caddy      - full protocol support incl. gRPC (fast & stable)${RESET}"
+echo -e "  ${YELLOW}4) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
+echo -e "  ${YELLOW}5) OpenResty  - WS/HTTPUpgrade/XHTTP only, NO gRPC (nginx limitation)${RESET}"
 echo ""
 read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-6] (Default 1): ${RESET}")" ENGINE_CHOICE
 
 case "$ENGINE_CHOICE" in
     2) ENGINE="Envoy";      PROXY_ENV="envoy";;
     3) ENGINE="Caddy";      PROXY_ENV="caddy";;
-    4) ENGINE="H2O";        PROXY_ENV="h2o";;
-    5) ENGINE="Traefik";    PROXY_ENV="traefik";;
-    6) ENGINE="OpenResty";  PROXY_ENV="openresty";;
+    4) ENGINE="Traefik";    PROXY_ENV="traefik";;
+    5) ENGINE="OpenResty";  PROXY_ENV="openresty";;
     *) ENGINE="HAProxy";    PROXY_ENV="haproxy";;
 esac
 DOCKERFILE="proxies/${PROXY_ENV}/Dockerfile"
@@ -104,16 +208,9 @@ if [ ! -f "$DOCKERFILE" ]; then
 fi
 echo -e "  ${GREEN}SELECTED PROXY ENGINE: ${ENGINE}${RESET}"
 if [ "$PROXY_ENV" == "openresty" ]; then
-    echo -e "  ${YELLOW}Note: gRPC and H2 endpoints will return 501 on this engine - nginx${RESET}"
-    echo -e "  ${YELLOW}cannot multiplex HTTP/1.1 and cleartext HTTP/2 on one port. Pick${RESET}"
-    echo -e "  ${YELLOW}another engine if you need those transports.${RESET}"
-elif [ "$PROXY_ENV" == "haproxy" ]; then
-    echo -e "  ${YELLOW}Note: WS/HU/XHTTP work out of the box. gRPC and H2 need the client${RESET}"
-    echo -e "  ${YELLOW}to open real HTTP/2, which only reaches this container if you${RESET}"
-    echo -e "  ${YELLOW}redeploy with 'gcloud run deploy --use-http2' - and that stops Cloud${RESET}"
-    echo -e "  ${YELLOW}Run's automatic downgrade for everything else, so WS/HU/XHTTP and${RESET}"
-    echo -e "  ${YELLOW}gRPC/H2 won't both reliably work from the same HAProxy deployment.${RESET}"
-    echo -e "  ${YELLOW}Need both at once? Pick Envoy or Caddy instead.${RESET}"
+    echo -e "  ${YELLOW}Note: gRPC endpoints will return 501 on this engine - nginx cannot${RESET}"
+    echo -e "  ${YELLOW}multiplex HTTP/1.1 and cleartext HTTP/2 on one port. Pick another${RESET}"
+    echo -e "  ${YELLOW}engine if you need the gRPC transport.${RESET}"
 fi
 echo ""
 
@@ -165,12 +262,49 @@ case "$MODE_CHOICE" in
 esac
 
 # ------------------------------------------------------------------------
+# QUIET RUNNER
+# Runs a command with its stdout/stderr fully captured to a log file and
+# NOTHING streamed to the terminal - just a small animated "working" line
+# while it runs. On success the line is replaced with a one-line OK and
+# the log file is deleted. On failure the line is replaced with a FAILED
+# marker and the last 30 lines of the log are printed so you still get a
+# real error message, not a silent black box.
+#
+# Usage: run_quiet "Building Traefik image" build.log gcloud builds submit ...
+# ------------------------------------------------------------------------
+run_quiet() {
+    local label="$1" logfile="$2"
+    shift 2
+    : > "$logfile"
+    "$@" >"$logfile" 2>&1 &
+    local pid=$!
+    local spin='|/-\'
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$(( (i + 1) % 4 ))
+        printf "\r  ${CYAN}%s...${RESET} %s" "$label" "${spin:$i:1}"
+        sleep 0.2
+    done
+    wait "$pid"
+    local status=$?
+    if [ "$status" -eq 0 ]; then
+        printf "\r  ${GREEN}%s... OK${RESET}          \n" "$label"
+        rm -f "$logfile"
+        return 0
+    else
+        printf "\r  ${RED}%s... FAILED${RESET}          \n" "$label"
+        echo -e "  ${RED}Last 30 log lines (full log kept at ${logfile}):${RESET}"
+        tail -n 30 "$logfile"
+        return "$status"
+    fi
+}
+
+# ------------------------------------------------------------------------
 # BUILD - a small generated cloudbuild.yaml points Cloud Build at the
 # chosen engine's Dockerfile while the build context stays the repo root
 # (so proxies/<engine>/* and common/* are both reachable via COPY).
-# Output streams live below - no fake spinner, no fixed sleep, no
-# after-the-fact "done": you see gcloud's own build log lines as they
-# happen, and the log is also kept on disk for the failure path.
+# Output is fully suppressed unless the build fails (see run_quiet above)
+# - no wall of Docker/Cloud Build log lines on a normal run.
 # ------------------------------------------------------------------------
 CB_CONFIG=$(mktemp)
 cat > "$CB_CONFIG" <<YAML
@@ -181,28 +315,16 @@ images:
   - 'gcr.io/${PROJECT_ID}/${IMAGE_TAG}'
 YAML
 
-# gcloud's own boilerplate (archive/tarball-upload/build-created/log-URL/
-# polling-interval lines) is noise you don't need on every run - it's
-# filtered from what prints to the terminal below with `sed`, not from
-# the log file: the FULL, unfiltered output (including those lines) is
-# always kept in build.log so `tail` on a failure still shows everything.
-# `sed -E '/pattern/d'` always exits 0, so it can't mask a real gcloud
-# failure through the pipe - `set -o pipefail` (top of this script) still
-# reports gcloud's own exit code through the pipeline correctly.
-QUIET_FILTER='^(Creating temporary archive|Uploading tarball|Created \[|Logs are available at|Waiting for build to complete)'
-
-echo -e "  ${CYAN}Building ${ENGINE} image...${RESET}"
-if ! gcloud builds submit . --config "$CB_CONFIG" --project="$PROJECT_ID" 2>&1 \
-        | tee build.log | sed -E "/${QUIET_FILTER}/d"; then
-    echo -e "  ${RED}BUILD FAILED. Last 30 log lines:${RESET}"
-    tail -n 30 build.log
+if ! run_quiet "Building ${ENGINE} image" build.log \
+        gcloud builds submit . --config "$CB_CONFIG" --project="$PROJECT_ID"; then
     rm -f "$CB_CONFIG"
     exit 1
 fi
 rm -f "$CB_CONFIG"
 
 # Quota-safe deploy: try the chosen tier, step down automatically rather
-# than failing outright on restrictive quotas. Output streams live.
+# than failing outright on restrictive quotas. Each attempt is quiet too -
+# only the final failure (after all tiers are exhausted) prints its log.
 deploy_attempt() {
     local cpu="$1" mem="$2" maxi="$3"
     shift 3
@@ -213,21 +335,21 @@ deploy_attempt() {
         --max-instances "$maxi" \
         --timeout 3600 --allow-unauthenticated --project="$PROJECT_ID" \
         --set-env-vars "ADS_MODE=${ADS_MODE}" \
-        --quiet "$@" 2>&1 | tee deploy.log | sed -E "/${QUIET_FILTER}/d"
-    return "${PIPESTATUS[0]}"
+        --quiet "$@"
 }
 
 echo ""
-echo -e "  ${CYAN}Deploying to Cloud Run in ${REGION}...${RESET}"
-if deploy_attempt "$CPU" "$RAM" "$MAX_INSTANCES" --concurrency 1000 --cpu-boost --no-cpu-throttling --min-instances 1; then
+if run_quiet "Deploying to Cloud Run in ${REGION} (full tier)" deploy.log \
+        deploy_attempt "$CPU" "$RAM" "$MAX_INSTANCES" --concurrency 1000 --cpu-boost --no-cpu-throttling --min-instances 1; then
     DEPLOY_NOTE="full stability tuning (always-on CPU)"
-elif deploy_attempt 1 2Gi 2 --concurrency 500 --no-cpu-throttling --min-instances 1; then
+elif run_quiet "Deploying to Cloud Run in ${REGION} (reduced tier)" deploy.log \
+        deploy_attempt 1 2Gi 2 --concurrency 500 --no-cpu-throttling --min-instances 1; then
     DEPLOY_NOTE="reduced tier - project quota couldn't fit ${MODE}"
-elif deploy_attempt 1 2Gi 2 --concurrency 250 --min-instances 0; then
+elif run_quiet "Deploying to Cloud Run in ${REGION} (minimal tier)" deploy.log \
+        deploy_attempt 1 2Gi 2 --concurrency 250 --min-instances 0; then
     DEPLOY_NOTE="minimal tier, no always-on CPU - expect cold-start delay after idle"
 else
-    echo -e "  ${RED}DEPLOYMENT FAILED. Last 30 log lines:${RESET}"
-    tail -n 30 deploy.log
+    echo -e "  ${RED}DEPLOYMENT FAILED on every tier.${RESET}"
     exit 1
 fi
 
@@ -246,54 +368,144 @@ echo ""
 echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
 echo -e "  ${CYAN}                    PATHS & PROTOCOLS${RESET}"
 echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
-echo -e "  ${GREEN}VLESS${RESET}        | WS: /vless-saeka   | HU: /vless-saeka-hu   | XH: /vless-saeka-xh   | gRPC: /vless-saeka-grpc   | H2: /vless-saeka-h2"
-echo -e "  ${GREEN}VMess${RESET}        | WS: /vmess-saeka   | HU: /vmess-saeka-hu   | XH: /vmess-saeka-xh   | gRPC: /vmess-saeka-grpc   | H2: /vmess-saeka-h2"
-echo -e "  ${GREEN}TROJAN${RESET}       | WS: /saeka-tojirp  | HU: /saeka-tojirp-hu  | XH: /saeka-tojirp-xh  | gRPC: /saeka-tojirp-grpc  | H2: /saeka-tojirp-h2"
-echo -e "  ${GREEN}Shadowsocks${RESET}  | WS: /ss-saeka      | HU: /ss-saeka-hu      | XH: /ss-saeka-xh      | gRPC: /ss-saeka-grpc      | H2: /ss-saeka-h2"
+echo -e "  ${GREEN}VLESS${RESET}        | WS: /vless-saeka   | HU: /vless-saeka-hu   | XH: /vless-saeka-xh   | gRPC: /vless-saeka-grpc"
+echo -e "  ${GREEN}VMess${RESET}        | WS: /vmess-saeka   | HU: /vmess-saeka-hu   | XH: /vmess-saeka-xh   | gRPC: /vmess-saeka-grpc"
+echo -e "  ${GREEN}TROJAN${RESET}       | WS: /saeka-tojirp  | HU: /saeka-tojirp-hu  | XH: /saeka-tojirp-xh  | gRPC: /saeka-tojirp-grpc"
+echo -e "  ${GREEN}Shadowsocks${RESET}  | WS: /ss-saeka      | HU: /ss-saeka-hu      | XH: /ss-saeka-xh      | gRPC: /ss-saeka-grpc"
 echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
 if [ "$PROXY_ENV" == "openresty" ]; then
-    echo -e "  ${YELLOW}gRPC and H2 paths above will return 501 on OpenResty - see engine note.${RESET}"
-elif [ "$PROXY_ENV" == "haproxy" ]; then
-    echo -e "  ${YELLOW}gRPC and H2 paths above need this service redeployed with --use-http2${RESET}"
-    echo -e "  ${YELLOW}to be reachable at all - see engine note above.${RESET}"
+    echo -e "  ${YELLOW}gRPC paths above will return 501 on OpenResty - see engine note.${RESET}"
 fi
 echo ""
 
 # ------------------------------------------------------------------------
-# CUSTOM DOMAIN (optional)
-# Cloud Run domain mappings work identically no matter which proxy engine
-# is inside the container - none of the six engine configs route on the
-# Host header, they all match any host on :8080 - so this is just wiring
-# your domain to the service, not a per-engine thing.
+# CUSTOM DOMAIN (optional) - Global HTTPS Load Balancer, not domain-mappings
+#
+# `gcloud run domain-mappings create` requires proving ownership through
+# Search Console first, which is the friction point this replaces. This
+# instead puts a Global External HTTPS Load Balancer (static IP + serverless
+# NEG + backend service + URL map + Google-managed cert) in front of the
+# SAME Cloud Run service. Google issues the cert automatically once your
+# domain's DNS A record resolves to the static IP - no manual verification
+# step. This is purely additive: the plain *.run.app URL and a normal
+# `gcloud run deploy` keep working exactly as before, untouched by any of
+# this. Re-run the script with the same SERVICE_NAME to add more domains -
+# each one gets appended to the same load balancer and cert.
+#
+# Every domain that's ever been added for this service is tracked in a
+# local file (.domains-<service>.list) so re-runs know the full set to put
+# on the certificate. Managed certs are immutable once created, so adding
+# a domain mints a new cert and repoints the HTTPS proxy at it, then drops
+# the old one - the load balancer, static IP and backend stay the same.
 # ------------------------------------------------------------------------
 echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${GREEN}             CUSTOM DOMAIN (OPTIONAL)${RESET}"
 echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${YELLOW}Requires: domain already verified for this GCP project${RESET}"
-echo -e "  ${YELLOW}(https://search.google.com/search-console -> Ownership verification,${RESET}"
-echo -e "  ${YELLOW}then linked under 'gcloud domains verify DOMAIN' / Cloud Console).${RESET}"
+echo -e "  ${YELLOW}Sets up a Global HTTPS Load Balancer in front of Cloud Run.${RESET}"
+echo -e "  ${YELLOW}No Search Console ownership verification - point the domain's${RESET}"
+echo -e "  ${YELLOW}DNS A record at the static IP printed below and Google issues${RESET}"
+echo -e "  ${YELLOW}the cert automatically once DNS resolves.${RESET}"
 echo ""
 read -r -p "$(echo -e "  ${CYAN}Domain to map (blank to skip): ${RESET}")" CUSTOM_DOMAIN
 
 FINAL_HOST="$CLEAN_HOST"
 if [ -n "$CUSTOM_DOMAIN" ]; then
-    echo -e "  ${CYAN}Creating domain mapping ${CUSTOM_DOMAIN} -> ${SERVICE_NAME} ...${RESET}"
-    if MAP_OUT=$(gcloud run domain-mappings create \
-            --service "$SERVICE_NAME" --domain "$CUSTOM_DOMAIN" \
-            --region "$REGION" --project="$PROJECT_ID" --quiet 2>&1); then
-        echo -e "  ${GREEN}Mapping created. Add these DNS records at your registrar/DNS host:${RESET}"
-        echo "$MAP_OUT" | grep -E 'NAME|rrdata|TYPE|---' || echo "$MAP_OUT"
+    DOMAINS_FILE="${SCRIPT_DIR}/.domains-${SERVICE_NAME}.list"
+    touch "$DOMAINS_FILE"
+    grep -qxF "$CUSTOM_DOMAIN" "$DOMAINS_FILE" || echo "$CUSTOM_DOMAIN" >> "$DOMAINS_FILE"
+    DOMAINS_CSV=$(paste -sd, "$DOMAINS_FILE")
+
+    IP_NAME="${SERVICE_NAME}-ip"
+    NEG_NAME="${SERVICE_NAME}-neg"
+    BACKEND_NAME="${SERVICE_NAME}-backend"
+    URLMAP_NAME="${SERVICE_NAME}-urlmap"
+    HTTPS_PROXY_NAME="${SERVICE_NAME}-https-proxy"
+    FWD_RULE_NAME="${SERVICE_NAME}-https-fwd"
+    CERT_NAME="${SERVICE_NAME}-cert-$(date +%s)"
+    lb_setup_failed=0
+
+    echo -e "  ${CYAN}Provisioning load balancer for: ${GREEN}${DOMAINS_CSV}${RESET}"
+
+    gcloud services enable compute.googleapis.com --project="$PROJECT_ID" >/dev/null 2>&1 || true
+
+    # 1. Static global IP - reused across runs/domains once reserved.
+    if ! gcloud compute addresses describe "$IP_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
+        run_quiet "Reserving static IP" lb.log \
+            gcloud compute addresses create "$IP_NAME" --global --project="$PROJECT_ID" || lb_setup_failed=1
+    fi
+    STATIC_IP=$(gcloud compute addresses describe "$IP_NAME" --global --project="$PROJECT_ID" --format='value(address)' 2>/dev/null)
+
+    # 2. Serverless NEG pointing straight at this Cloud Run service.
+    if ! gcloud compute network-endpoint-groups describe "$NEG_NAME" --region="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
+        run_quiet "Creating serverless NEG" lb.log \
+            gcloud compute network-endpoint-groups create "$NEG_NAME" \
+                --region="$REGION" --network-endpoint-type=serverless \
+                --cloud-run-service="$SERVICE_NAME" --project="$PROJECT_ID" || lb_setup_failed=1
+    fi
+
+    # 3. Backend service wrapping the NEG.
+    if ! gcloud compute backend-services describe "$BACKEND_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
+        run_quiet "Creating backend service" lb.log \
+            gcloud compute backend-services create "$BACKEND_NAME" --global --project="$PROJECT_ID" || lb_setup_failed=1
+        run_quiet "Attaching NEG to backend" lb.log \
+            gcloud compute backend-services add-backend "$BACKEND_NAME" --global \
+                --network-endpoint-group="$NEG_NAME" --network-endpoint-group-region="$REGION" \
+                --project="$PROJECT_ID" || lb_setup_failed=1
+    fi
+
+    # 4. URL map - single default service, every domain shares it.
+    if ! gcloud compute url-maps describe "$URLMAP_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
+        run_quiet "Creating URL map" lb.log \
+            gcloud compute url-maps create "$URLMAP_NAME" --default-service="$BACKEND_NAME" \
+                --global --project="$PROJECT_ID" || lb_setup_failed=1
+    fi
+
+    # 5. Google-managed cert covering every domain seen so far.
+    run_quiet "Requesting managed cert for ${DOMAINS_CSV}" lb.log \
+        gcloud compute ssl-certificates create "$CERT_NAME" \
+            --domains="$DOMAINS_CSV" --global --project="$PROJECT_ID" || lb_setup_failed=1
+
+    # 6. Target HTTPS proxy - create once, repoint at the new cert on
+    #    later runs (and drop the now-unused old cert).
+    if ! gcloud compute target-https-proxies describe "$HTTPS_PROXY_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
+        run_quiet "Creating HTTPS proxy" lb.log \
+            gcloud compute target-https-proxies create "$HTTPS_PROXY_NAME" \
+                --url-map="$URLMAP_NAME" --ssl-certificates="$CERT_NAME" \
+                --global --project="$PROJECT_ID" || lb_setup_failed=1
+    else
+        OLD_CERT=$(gcloud compute target-https-proxies describe "$HTTPS_PROXY_NAME" --global --project="$PROJECT_ID" --format='value(sslCertificates)' 2>/dev/null | sed 's|.*/||')
+        run_quiet "Repointing HTTPS proxy at new cert" lb.log \
+            gcloud compute target-https-proxies update "$HTTPS_PROXY_NAME" \
+                --ssl-certificates="$CERT_NAME" --global --project="$PROJECT_ID" || lb_setup_failed=1
+        if [ -n "$OLD_CERT" ] && [ "$OLD_CERT" != "$CERT_NAME" ]; then
+            gcloud compute ssl-certificates delete "$OLD_CERT" --global --project="$PROJECT_ID" --quiet >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # 7. Forwarding rule - the actual :443 entry point on the static IP.
+    if ! gcloud compute forwarding-rules describe "$FWD_RULE_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
+        run_quiet "Creating forwarding rule" lb.log \
+            gcloud compute forwarding-rules create "$FWD_RULE_NAME" \
+                --global --target-https-proxy="$HTTPS_PROXY_NAME" \
+                --address="$IP_NAME" --ports=443 --project="$PROJECT_ID" || lb_setup_failed=1
+    fi
+
+    if [ "$lb_setup_failed" -eq 0 ]; then
         echo ""
-        echo -e "  ${YELLOW}Google issues a managed TLS cert automatically once DNS resolves -${RESET}"
-        echo -e "  ${YELLOW}that can take anywhere from a few minutes to ~24h. Check status with:${RESET}"
-        echo -e "  ${GREEN}gcloud run domain-mappings describe --domain ${CUSTOM_DOMAIN} --region ${REGION} --project ${PROJECT_ID}${RESET}"
+        echo -e "  ${GREEN}Load balancer ready. Point this domain's DNS A record at:${RESET}"
+        echo -e "  ${GREEN}${STATIC_IP}${RESET}"
+        echo -e "  ${CYAN}Domains currently on the cert: ${GREEN}${DOMAINS_CSV}${RESET}"
+        echo -e "  ${YELLOW}No Search Console verification needed - once DNS resolves,${RESET}"
+        echo -e "  ${YELLOW}Google auto-issues the cert (usually 15-60 min, sometimes longer).${RESET}"
+        echo -e "  ${YELLOW}Check status with:${RESET}"
+        echo -e "  ${GREEN}gcloud compute ssl-certificates describe ${CERT_NAME} --global --project=${PROJECT_ID} --format='value(managed.status)'${RESET}"
+        echo -e "  ${YELLOW}Re-run this script with SERVICE_NAME=${SERVICE_NAME} and a new domain${RESET}"
+        echo -e "  ${YELLOW}to add it to this same load balancer/cert later.${RESET}"
         FINAL_HOST="$CUSTOM_DOMAIN"
     else
-        echo -e "  ${RED}Domain mapping failed:${RESET}"
-        echo "$MAP_OUT"
-        echo -e "  ${YELLOW}Most common cause: the domain isn't verified for this project yet -${RESET}"
-        echo -e "  ${YELLOW}see the note above. Falling back to the raw Cloud Run host.${RESET}"
+        echo -e "  ${RED}Load balancer setup hit an error above - falling back to the raw Cloud Run host.${RESET}"
     fi
+    rm -f lb.log
     echo ""
 fi
 
@@ -301,5 +513,5 @@ echo -e "  ${CYAN}Generate client links / outbound JSON with:${RESET}"
 echo -e "  ${GREEN}./generate-client-links.sh ${FINAL_HOST}${RESET}"
 echo ""
 
-rm -f build.log deploy.log
+rm -f build.log deploy.log lb.log
 echo -e "  ${GREEN}Deployer session complete.${RESET}"
