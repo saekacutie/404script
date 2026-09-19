@@ -135,6 +135,26 @@
       "settings": {"clients": [{"password": "saeka", "method": "aes-256-gcm"}]},
       "streamSettings": {"network": "grpc", "grpcSettings": {"serviceName": "ss-saeka-grpc"}, "sockopt": {"tcpFastOpen": true, "tcpNoDelay": true, "tcpKeepAliveInterval": 15}}
     }
+    {
+  "port": 8082,
+  "listen": "127.0.0.1",
+  "protocol": "http",
+  "tag": "ssh-ws-inbound",
+  "settings": {
+    "accounts": [
+      {
+        "user": "saeka",
+        "pass": "saeka"
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "ws",
+    "wsSettings": {
+      "path": "/saeka-ssh"
+    }
+  }
+}
   ],
   "outbounds": [
     {"protocol": "freedom", "tag": "direct"},
@@ -145,7 +165,7 @@
     "rules": [
       {
         "type": "field",
-        "inboundTag": ["trojan-ws", "trojan-hu", "trojan-xh", "trojan-grpc", "vmess-ws", "vmess-hu", "vmess-xh", "vmess-grpc", "vless-ws", "vless-hu", "vless-xh", "vless-grpc", "ss-ws", "ss-hu", "ss-xh", "ss-grpc"],
+        "inboundTag": ["trojan-ws", "trojan-hu", "trojan-xh", "trojan-grpc", "vmess-ws", "vmess-hu", "vmess-xh", "vmess-grpc", "vless-ws", "vless-hu", "vless-xh", "vless-grpc", "ss-ws", "ss-hu", "ss-xh", "ss-grpc", "saeka-ssh"],
         "outboundTag": "direct"
       }
     ]
