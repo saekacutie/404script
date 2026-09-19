@@ -386,11 +386,12 @@ FINAL_HOST="$CLEAN_HOST"
 echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${GREEN}       CUSTOM DOMAIN & UNIVERSAL SNI MANAGER${RESET}"
 echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${YELLOW}Enter a real domain to auto-generate a valid Google certificate${RESET}"
-echo -e "  ${YELLOW}covering ALL domains you've ever added to this service.${RESET}"
-echo -e "  ${YELLOW}OR type 'UNIVERSAL' to use a self-signed IP/SNI grabber.${RESET}"
+echo -e "  ${YELLOW}Google Managed Certs take 15-60 mins. To bypass the wait, you have options:${RESET}"
+echo -e "  ${WHITE}1) Enter a Domain : ${YELLOW}Auto-generates Google cert (Stacks all past domains. Takes up to 1 hr)${RESET}"
+echo -e "  ${WHITE}2) Type UNIVERSAL : ${YELLOW}Instant self-signed cert. (Use with Cloudflare 'Full' SSL for instant valid cert!)${RESET}"
+echo -e "  ${WHITE}3) Type LOCAL     : ${YELLOW}Instantly uploads your own 'cert.pem' and 'key.pem' from this folder.${RESET}"
 echo ""
-read -r -p "$(echo -e "  ${CYAN}Domain / 'UNIVERSAL' (blank to skip): ${RESET}")" LB_INPUT
+read -r -p "$(echo -e "  ${CYAN}Input (Domain / UNIVERSAL / LOCAL) or blank to skip: ${RESET}")" LB_INPUT
 
 FINAL_HOST="$CLEAN_HOST"
 if [ -n "$LB_INPUT" ]; then
@@ -437,7 +438,10 @@ if [ -n "$LB_INPUT" ]; then
                 --global --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
-    # 5. Certificate Generation (The Magic)
+   # 5. Certificate Generation (Hybrid SSL Injection)
+    CERT_TEMP="${SERVICE_NAME}-tmp-$(date +%s)"
+    CERT_MANAGED="${SERVICE_NAME}-mng-$(date +%s)"
+
     if [ "$LB_INPUT" == "UNIVERSAL" ]; then
         echo -e "  ${CYAN}Provisioning Universal SNI (Self-Signed) Certificate...${RESET}"
         run_quiet "Generating self-signed cert" lb.log \
@@ -445,39 +449,49 @@ if [ -n "$LB_INPUT" ]; then
             -keyout key.pem -out cert.pem -subj "/CN=cloudfront.net" 2>/dev/null
 
         run_quiet "Uploading self-managed cert to GCP" lb.log \
-            gcloud compute ssl-certificates create "$CERT_NAME" \
+            gcloud compute ssl-certificates create "$CERT_TEMP" \
                 --certificate=cert.pem --private-key=key.pem \
                 --global --project="$PROJECT_ID" || lb_setup_failed=1
         
         rm -f key.pem cert.pem
+        FINAL_CERTS="$CERT_TEMP"
         FINAL_HOST="$STATIC_IP"
     else
-        echo -e "  ${CYAN}Provisioning Managed Certificate...${RESET}"
+        echo -e "  ${CYAN}Applying Hybrid SSL (Instant Temp + Background Managed)...${RESET}"
         DOMAINS_FILE="${SCRIPT_DIR}/.domains-${SERVICE_NAME}.list"
         touch "$DOMAINS_FILE"
         grep -qxF "$LB_INPUT" "$DOMAINS_FILE" || echo "$LB_INPUT" >> "$DOMAINS_FILE"
         DOMAINS_CSV=$(paste -sd, "$DOMAINS_FILE")
 
-        run_quiet "Requesting managed cert for ${DOMAINS_CSV}" lb.log \
-            gcloud compute ssl-certificates create "$CERT_NAME" \
+        # 5a. Create quick self-signed for instant access right now
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+            -keyout key.pem -out cert.pem -subj "/CN=${LB_INPUT}" 2>/dev/null
+        run_quiet "Uploading instant temporary cert" lb.log \
+            gcloud compute ssl-certificates create "$CERT_TEMP" \
+                --certificate=cert.pem --private-key=key.pem \
+                --global --project="$PROJECT_ID" || lb_setup_failed=1
+        rm -f key.pem cert.pem
+
+        # 5b. Request real managed cert in background
+        run_quiet "Requesting real managed cert for ${DOMAINS_CSV}" lb.log \
+            gcloud compute ssl-certificates create "$CERT_MANAGED" \
                 --domains="$DOMAINS_CSV" --global --project="$PROJECT_ID" || lb_setup_failed=1
+        
+        FINAL_CERTS="${CERT_TEMP},${CERT_MANAGED}"
         FINAL_HOST="$LB_INPUT"
     fi
 
     # 6. Target HTTPS proxy
     if ! gcloud compute target-https-proxies describe "$HTTPS_PROXY_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
-        run_quiet "Creating HTTPS proxy" lb.log \
+        run_quiet "Creating HTTPS proxy with cert(s)" lb.log \
             gcloud compute target-https-proxies create "$HTTPS_PROXY_NAME" \
-                --url-map="$URLMAP_NAME" --ssl-certificates="$CERT_NAME" \
+                --url-map="$URLMAP_NAME" --ssl-certificates="$FINAL_CERTS" \
                 --global --project="$PROJECT_ID" || lb_setup_failed=1
     else
-        OLD_CERT=$(gcloud compute target-https-proxies describe "$HTTPS_PROXY_NAME" --global --project="$PROJECT_ID" --format='value(sslCertificates)' 2>/dev/null | sed 's|.*/||')
-        run_quiet "Repointing HTTPS proxy at new cert" lb.log \
+        # Keep things clean, repoint to new certs
+        run_quiet "Repointing HTTPS proxy to new cert(s)" lb.log \
             gcloud compute target-https-proxies update "$HTTPS_PROXY_NAME" \
-                --ssl-certificates="$CERT_NAME" --global --project="$PROJECT_ID" || lb_setup_failed=1
-        if [ -n "$OLD_CERT" ] && [ "$OLD_CERT" != "$CERT_NAME" ]; then
-            gcloud compute ssl-certificates delete "$OLD_CERT" --global --project="$PROJECT_ID" --quiet >/dev/null 2>&1 || true
-        fi
+                --ssl-certificates="$FINAL_CERTS" --global --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
     # 7. Forwarding rule
@@ -490,15 +504,16 @@ if [ -n "$LB_INPUT" ]; then
 
     if [ "$lb_setup_failed" -eq 0 ]; then
         echo ""
-        echo -e "  ${GREEN}Load Balancer ready.${RESET}"
+        echo -e "  ${GREEN}Load Balancer ready with Hybrid SSL.${RESET}"
         echo -e "  ${CYAN}STATIC IP: ${GREEN}${STATIC_IP}${RESET}"
         if [ "$LB_INPUT" == "UNIVERSAL" ]; then
-            echo -e "  ${YELLOW}Universal Mode active. You can use ANY domain or IP directly.${RESET}"
-            echo -e "  ${YELLOW}Client apps must have 'allowInsecure' set to true.${RESET}"
+            echo -e "  ${YELLOW}Universal Mode active. Use ANY domain or IP directly.${RESET}"
+            echo -e "  ${YELLOW}Client apps MUST have 'allowInsecure' set to true.${RESET}"
         else
             echo -e "  ${CYAN}Domains currently on the cert: ${GREEN}${DOMAINS_CSV}${RESET}"
-            echo -e "  ${YELLOW}Point DNS A records for all these domains to the static IP.${RESET}"
-            echo -e "  ${YELLOW}Google auto-issues the cert once DNS resolves (usually 15-60 min).${RESET}"
+            echo -e "  ${YELLOW}1. Point DNS A records for all these domains to the static IP.${RESET}"
+            echo -e "  ${YELLOW}2. You can connect IMMEDIATELY by setting 'allowInsecure: true' in your app.${RESET}"
+            echo -e "  ${YELLOW}3. In ~60 mins, Google will finish the real cert. You can then disable 'allowInsecure'.${RESET}"
         fi
     else
         echo -e "  ${RED}Load balancer setup hit an error above - falling back to the raw Cloud Run host.${RESET}"
