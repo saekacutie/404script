@@ -15,9 +15,6 @@ COPY common/config-ads.json   /etc/xray/config-ads.json
 COPY common/config-noads.json /etc/xray/config-noads.json
 COPY proxies/traefik/traefik.yml /etc/traefik/traefik.yml
 COPY proxies/traefik/dynamic.yml /etc/traefik/dynamic.yml
-COPY common/ssh-install.sh /tmp/ssh-install.sh
-COPY common/ssh-ws.sh /usr/local/bin/ssh-ws.sh
-RUN sh /tmp/ssh-install.sh && rm -f /tmp/ssh-install.sh && chmod +x /usr/local/bin/ssh-ws.sh
 COPY proxies/traefik/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

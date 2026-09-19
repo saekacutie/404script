@@ -1,56 +1,103 @@
-# SSH over WebSocket (`/saeka-ssh`, default login `saeka:saeka`)
+# ch-saeka (v2 - per-engine)
+
+## What changed from v1
+
+**v1** had one `Dockerfile` that installed *all six* proxy engines
+(HAProxy, Envoy, Caddy, Traefik, H2O-built-from-source, OpenResty) into a
+single Ubuntu image, then picked one at *container start* via
+`PROXY_ENGINE`. That meant every build paid for H2O's from-source
+`cmake`/`ninja` compile and every other engine's install, even though a
+given deployment only ever runs one of them.
+
+**v2** gives each engine its own folder under `proxies/<engine>/` with
+its own `Dockerfile`, own config, own `entrypoint.sh`. Picking HAProxy in
+`deploy.sh` now builds *only* `proxies/haproxy/Dockerfile` - a small
+Alpine image with HAProxy + Xray and nothing else. None of the other
+five engines are downloaded, compiled, or added to the image.
 
 ```
-client ──WS /saeka-ssh──▶ proxy engine :8080 ──▶ xray dokodemo-door 127.0.0.1:10016 ──▶ dropbear 127.0.0.1:2222
+common/                  shared by every engine
+  config-ads.json         Xray inbound config, ads allowed
+  config-noads.json        "        "        , ad/tracker domains blackholed
+  index.html               plain 404 landing page (served where an engine has a static fallback)
+proxies/
+  haproxy/  Dockerfile  haproxy.cfg   entrypoint.sh
+  envoy/    Dockerfile  envoy.yaml    entrypoint.sh
+  caddy/    Dockerfile  Caddyfile     entrypoint.sh
+  h2o/      Dockerfile  h2o.conf      entrypoint.sh
+  traefik/  Dockerfile  traefik.yml  dynamic.yml  entrypoint.sh
+  openresty/Dockerfile  nginx.conf    entrypoint.sh
+deploy.sh                 interactive deployer (password-gated, streams real build/deploy logs)
+regions.sh                 region picker, sourced by deploy.sh
+generate-client-links.sh  builds vless/trojan share links + outbound JSON for a deployed host
+gh_verify.py               generic multi-format syntax linter for this repo (yaml/json/py/sh/docker/haproxy/nginx/envoy)
 ```
 
-## Files
-| Path | What changed |
-|---|---|
-| `common/ssh-install.sh` | **new** – build-time install of dropbear (Alpine or Debian/Ubuntu) |
-| `common/ssh-ws.sh` | **new** – runtime: creates the user, writes the WS bridge config, starts + watchdogs dropbear and the bridge |
-| `proxies/*/entrypoint.sh` | now `source` ssh-ws.sh, start SSH-WS, trap it on shutdown, watchdog it |
-| `proxies/caddy/Caddyfile`, `h2o/h2o.conf`, `envoy/envoy.yaml`, `haproxy/haproxy.cfg`, `openresty/nginx.conf`, `traefik/dynamic.yml` | new `/saeka-ssh` route -> `127.0.0.1:10016` (HTTP/1.1 + Upgrade) |
-| `haproxy.cfg`, `openresty/nginx.conf` | per-IP rate limits (the source of the 429s) removed |
-| `proxies/*/Dockerfile` (all six) | rebuilt from the README's base-image table, each adding the three `ssh-install.sh` / `ssh-ws.sh` lines below |
-| `common/index.html` | plain 404 page (referenced by the h2o and openresty Dockerfiles; not otherwise touched) |
+## Base images (no Ubuntu, per your request)
 
-All six `proxies/<engine>/Dockerfile` are included and build against exactly
-the bases the README table specifies (`haproxy:2.9-alpine`, `caddy:2-alpine`,
-`traefik:v3.1`, `openresty/openresty:1.25.3.1-alpine`, `alpine:3.20 + apk add
-h2o`, `debian:bookworm-slim` + apt.envoyproxy.io for Envoy). The nginx engine's
-folder is `proxies/openresty/` to match `deploy.sh`'s `PROXY_ENV=openresty`
-and the README's own layout table - the previous `proxies/nginx/` name would
-not have matched what `deploy.sh` looks for.
+| Engine     | Base                              |
+|------------|------------------------------------|
+| HAProxy    | `haproxy:2.9-alpine`               |
+| Caddy      | `caddy:2-alpine`                   |
+| Traefik    | `traefik:v3.1` (alpine-based)      |
+| OpenResty  | `openresty/openresty:1.25.3.1-alpine` |
+| H2O        | `alpine:3.20` + `apk add h2o`      |
+| Envoy      | `debian:bookworm-slim` + apt.envoyproxy.io (Envoy's binary needs glibc, so it can't run on musl/Alpine - this is the one engine that isn't Alpine, but it's Debian-slim, not Ubuntu) |
 
-**Not included:** `common/config-ads.json` and `common/config-noads.json` -
-your Xray inbound configs - weren't in the files you gave me. Every
-Dockerfile still `COPY`s them from `common/`, so drop your existing copies
-into `common/` before building; nothing here needed to touch them.
+Xray-core is fetched once per engine from its GitHub release zip (small,
+statically-linked Go binary - works on both the Alpine and Debian bases
+above).
 
-## Dockerfile change (identical for every engine)
-Each Dockerfile adds this in its final stage, as root, before `COPY ...
-entrypoint.sh`:
-```dockerfile
-COPY common/ssh-install.sh /tmp/ssh-install.sh
-COPY common/ssh-ws.sh /usr/local/bin/ssh-ws.sh
-RUN sh /tmp/ssh-install.sh && rm -f /tmp/ssh-install.sh && chmod +x /usr/local/bin/ssh-ws.sh
+## Deploying
+
 ```
-(Envoy's Dockerfile runs this with `bash` instead of `sh`, matching the
-`bash`-only base it already required.)
-
-## Env vars (optional)
-`SSH_USER` (default `saeka`), `SSH_PASS` (default `saeka`), `SSH_ENABLE=0` to disable.
-Change the password without rebuilding: `gcloud run services update SVC --set-env-vars SSH_PASS=...`
-
-## Client
-```bash
-# SOCKS5 on 127.0.0.1:1080 (needs websocat)
-ssh -N -D 1080 -o StrictHostKeyChecking=no \
-    -o ProxyCommand='websocat --binary asyncstdio: wss://YOUR-SERVICE.run.app/saeka-ssh' \
-    saeka@localhost
+./deploy.sh
 ```
-HTTP-injector style apps: SSH host = your run.app host, port 443, TLS on, SNI = same host,
-WebSocket path `/saeka-ssh`, user/pass `saeka` / `saeka`.
 
-The account's shell is `/bin/false`: forwarding works, interactive shells / remote commands do not.
+You'll be asked for the deployer password first (see below), then
+engine, ads mode, region, service name, and sizing tier - same flow as
+v1. Build and deploy output now streams to your terminal as it happens
+(`tee`'d to `build.log`/`deploy.log`, which are only kept around if a
+step fails, for troubleshooting).
+
+### Deployer password
+
+`deploy.sh` checks the password you type against three SHA-256 hashes
+baked into the script - it never stores the plaintext password.
+**This is a "stop accidental runs" gate, not real security** - a hash
+sitting in a script anyone can read is brute-forceable offline, and
+that's true no matter how it's obfuscated. If you need actual access
+control, put it at the IAM/repo level, not in bash.
+
+### Building one engine directly (without the interactive script)
+
+```
+docker build -f proxies/haproxy/Dockerfile -t my-haproxy-image .
+```
+
+Build context is the repo root (so `common/` and the chosen
+`proxies/<engine>/` are both reachable) - just swap the `-f` path and
+image tag for a different engine.
+
+## Anti-abuse / rate limiting
+
+Basic per-IP connection and request-rate limiting is wired into the two
+engines whose config format supports it simply: HAProxy (stick-table,
+`too_many_conns` / `conn_rate_abuse` / `req_rate_abuse` ACLs, 429 on
+trip) and OpenResty (`limit_conn_zone` / `limit_req_zone`). This blunts
+casual abusive traffic from a single source; it isn't a substitute for
+network-level DDoS protection (e.g. Cloud Armor in front of Cloud Run).
+Ask if you want the same style of limiting added to Envoy/Caddy/Traefik/H2O.
+
+## One thing I changed without being asked
+
+The original `index.html` was styled as a fake "Qwiklabs lab
+expiration" countdown with a hidden "ACCESS PANEL" button, clearly meant
+to disguise this service's Cloud Run URL as an expired training-lab
+notice. Deploying persistent services on Qwiklabs/Cloud Skills Boost
+lab credentials, dressed up to not look like what it is, is the kind of
+thing that gets accounts banned and is outside what I'll help build out
+further - so I swapped it for a plain 404 page instead. Everything else
+in this rewrite (per-engine Dockerfiles, config fixes, rate limiting,
+streaming deploy output, password gate) is unrelated to that and stands
+on its own regardless of where you actually run it.

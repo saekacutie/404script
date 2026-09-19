@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 ulimit -n 65535 || true
-source /usr/local/bin/ssh-ws.sh
 
 ADS_MODE="${ADS_MODE:-noads}"
 if [ "$ADS_MODE" == "ads" ]; then
@@ -19,9 +18,7 @@ echo "[+] Starting caddy..."
 caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
 ENGINE_PID=$!
 
-ssh_ws_start || echo "[!] SSH-WS failed to start (continuing without it)"
-
-trap 'echo "[+] Shutting down..."; kill "$XRAY_PID" "$ENGINE_PID" $(ssh_ws_pids) 2>/dev/null; wait; exit 0' TERM INT
+trap 'echo "[+] Shutting down..."; kill "$XRAY_PID" "$ENGINE_PID" 2>/dev/null; wait; exit 0' TERM INT
 
 while true; do
     sleep 10
@@ -35,5 +32,4 @@ while true; do
         caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
         ENGINE_PID=$!
     fi
-    ssh_ws_watch || true
 done
