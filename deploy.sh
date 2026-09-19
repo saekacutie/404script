@@ -381,33 +381,27 @@ echo ""
 FINAL_HOST="$CLEAN_HOST"
 
 # ------------------------------------------------------------------------
-# UNIVERSAL SNI / IP LOAD BALANCER (Self-Signed)
-#
-# Replaces the Google-managed cert with a self-signed fallback certificate.
-# This allows the static IP to complete the TLS handshake for ANY domain,
-# arbitrary SNI, or direct IP connection instantly. No Search Console
-# verification or DNS A record propagation wait time is required.
+# CUSTOM DOMAIN & UNIVERSAL SNI LOAD BALANCER
 # ------------------------------------------------------------------------
 echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${GREEN}       UNIVERSAL SNI / IP GRABBER (LB)${RESET}"
+echo -e "  ${GREEN}       CUSTOM DOMAIN & UNIVERSAL SNI MANAGER${RESET}"
 echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${YELLOW}Provisions a Global HTTPS Load Balancer with a self-signed${RESET}"
-echo -e "  ${YELLOW}certificate. This allows you to point ANY domain to the IP,${RESET}"
-echo -e "  ${YELLOW}or use arbitrary SNIs directly without DNS validation.${RESET}"
+echo -e "  ${YELLOW}Enter a real domain to auto-generate a valid Google certificate${RESET}"
+echo -e "  ${YELLOW}covering ALL domains you've ever added to this service.${RESET}"
+echo -e "  ${YELLOW}OR type 'UNIVERSAL' to use a self-signed IP/SNI grabber.${RESET}"
 echo ""
-read -r -p "$(echo -e "  ${CYAN}Setup Universal Load Balancer? [y/N]: ${RESET}")" SETUP_LB
+read -r -p "$(echo -e "  ${CYAN}Domain / 'UNIVERSAL' (blank to skip): ${RESET}")" LB_INPUT
 
-if [[ "$SETUP_LB" =~ ^[Yy]$ ]]; then
+FINAL_HOST="$CLEAN_HOST"
+if [ -n "$LB_INPUT" ]; then
     IP_NAME="${SERVICE_NAME}-ip"
     NEG_NAME="${SERVICE_NAME}-neg"
     BACKEND_NAME="${SERVICE_NAME}-backend"
     URLMAP_NAME="${SERVICE_NAME}-urlmap"
     HTTPS_PROXY_NAME="${SERVICE_NAME}-https-proxy"
     FWD_RULE_NAME="${SERVICE_NAME}-https-fwd"
-    CERT_NAME="${SERVICE_NAME}-selfsigned-$(date +%s)"
+    CERT_NAME="${SERVICE_NAME}-cert-$(date +%s)"
     lb_setup_failed=0
-
-    echo -e "  ${CYAN}Provisioning Universal SNI Load Balancer...${RESET}"
 
     gcloud services enable compute.googleapis.com --project="$PROJECT_ID" >/dev/null 2>&1 || true
 
@@ -443,17 +437,32 @@ if [[ "$SETUP_LB" =~ ^[Yy]$ ]]; then
                 --global --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
-    # 5. Generate and upload Self-Signed Certificate
-    run_quiet "Generating self-signed cert for universal SNI" lb.log \
-        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-        -keyout key.pem -out cert.pem -subj "/CN=cloudfront.net" 2>/dev/null
+    # 5. Certificate Generation (The Magic)
+    if [ "$LB_INPUT" == "UNIVERSAL" ]; then
+        echo -e "  ${CYAN}Provisioning Universal SNI (Self-Signed) Certificate...${RESET}"
+        run_quiet "Generating self-signed cert" lb.log \
+            openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout key.pem -out cert.pem -subj "/CN=cloudfront.net" 2>/dev/null
 
-    run_quiet "Uploading self-managed cert to GCP" lb.log \
-        gcloud compute ssl-certificates create "$CERT_NAME" \
-            --certificate=cert.pem --private-key=key.pem \
-            --global --project="$PROJECT_ID" || lb_setup_failed=1
-    
-    rm -f key.pem cert.pem
+        run_quiet "Uploading self-managed cert to GCP" lb.log \
+            gcloud compute ssl-certificates create "$CERT_NAME" \
+                --certificate=cert.pem --private-key=key.pem \
+                --global --project="$PROJECT_ID" || lb_setup_failed=1
+        
+        rm -f key.pem cert.pem
+        FINAL_HOST="$STATIC_IP"
+    else
+        echo -e "  ${CYAN}Provisioning Managed Certificate...${RESET}"
+        DOMAINS_FILE="${SCRIPT_DIR}/.domains-${SERVICE_NAME}.list"
+        touch "$DOMAINS_FILE"
+        grep -qxF "$LB_INPUT" "$DOMAINS_FILE" || echo "$LB_INPUT" >> "$DOMAINS_FILE"
+        DOMAINS_CSV=$(paste -sd, "$DOMAINS_FILE")
+
+        run_quiet "Requesting managed cert for ${DOMAINS_CSV}" lb.log \
+            gcloud compute ssl-certificates create "$CERT_NAME" \
+                --domains="$DOMAINS_CSV" --global --project="$PROJECT_ID" || lb_setup_failed=1
+        FINAL_HOST="$LB_INPUT"
+    fi
 
     # 6. Target HTTPS proxy
     if ! gcloud compute target-https-proxies describe "$HTTPS_PROXY_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
@@ -481,13 +490,16 @@ if [[ "$SETUP_LB" =~ ^[Yy]$ ]]; then
 
     if [ "$lb_setup_failed" -eq 0 ]; then
         echo ""
-        echo -e "  ${GREEN}Universal Load Balancer Ready.${RESET}"
+        echo -e "  ${GREEN}Load Balancer ready.${RESET}"
         echo -e "  ${CYAN}STATIC IP: ${GREEN}${STATIC_IP}${RESET}"
-        echo -e "  ${YELLOW}You can now point ANY domain to this IP, or use it directly.${RESET}"
-        echo -e "  ${YELLOW}IMPORTANT: Because this uses a self-signed cert, your client apps${RESET}"
-        echo -e "  ${YELLOW}(v2rayNG, NekoBox, HTTP Custom, etc.) MUST have 'allowInsecure'${RESET}"
-        echo -e "  ${YELLOW}enabled to bypass the certificate warning during handshake.${RESET}"
-        FINAL_HOST="$STATIC_IP"
+        if [ "$LB_INPUT" == "UNIVERSAL" ]; then
+            echo -e "  ${YELLOW}Universal Mode active. You can use ANY domain or IP directly.${RESET}"
+            echo -e "  ${YELLOW}Client apps must have 'allowInsecure' set to true.${RESET}"
+        else
+            echo -e "  ${CYAN}Domains currently on the cert: ${GREEN}${DOMAINS_CSV}${RESET}"
+            echo -e "  ${YELLOW}Point DNS A records for all these domains to the static IP.${RESET}"
+            echo -e "  ${YELLOW}Google auto-issues the cert once DNS resolves (usually 15-60 min).${RESET}"
+        fi
     else
         echo -e "  ${RED}Load balancer setup hit an error above - falling back to the raw Cloud Run host.${RESET}"
     fi
