@@ -37,7 +37,6 @@ BOX_PAD=$(( (TERM_WIDTH - BOX_WIDTH) / 2 ))
 BPAD="$(printf '%*s' "$BOX_PAD" '')"
 HRULE="$(printf '─%.0s' $(seq 1 $((BOX_WIDTH - 2))))"
 
-# Center a single plain-text line (no color codes counted in width).
 center_line() {
     local text="$1" color="${2:-}"
     local pad=$(( (TERM_WIDTH - ${#text}) / 2 ))
@@ -54,7 +53,6 @@ box_bottom() { printf "%s${CYAN}└%s┘${RESET}\n" "$BPAD" "$HRULE"; }
 box_sep()    { printf "%s${CYAN}├%s┤${RESET}\n" "$BPAD" "$HRULE"; }
 box_blank()  { printf "%s${CYAN}│${RESET}%*s${CYAN}│${RESET}\n" "$BPAD" "$((BOX_WIDTH - 2))" ""; }
 
-# Content-centered line inside the box. $1 = plain text, $2 = optional color.
 box_line() {
     local content="$1" color="${2:-}"
     local clen=${#content}
@@ -71,10 +69,6 @@ box_line() {
     fi
 }
 
-# ------------------------------------------------------------------------
-# GREETING POOL - 10 openers x 10 closers = exactly 100 combinations,
-# picked at random each run.
-# ------------------------------------------------------------------------
 GREET_OPEN=(
     "Welcome back,"      "Good to see you,"   "Hello again,"      "Systems nominal,"
     "Standing by,"       "Greetings,"         "All clear,"        "Access point live,"
@@ -102,11 +96,11 @@ render_gate_screen() {
     box_line "for VLESS / VMess / Trojan / Shadowsocks"
     box_blank
     box_line "SUPPORTED PROXY ENGINES" "${BOLD}${CYAN}"
-    box_line "HAProxy · Envoy · Caddy · Traefik · OpenResty"
+    box_line "HAProxy · Envoy · Caddy · H2O · Traefik · OpenResty"
     box_blank
     box_line "SUPPORTED TRANSPORTS" "${BOLD}${CYAN}"
-    box_line "WebSocket · HTTPUpgrade · XHTTP · gRPC*"
-    box_line "(*gRPC unsupported on OpenResty)" "${YELLOW}"
+    box_line "WebSocket · HTTPUpgrade · XHTTP · gRPC* · H2 · SSH-WS"
+    box_line "(*gRPC/H2 unsupported on OpenResty)" "${YELLOW}"
     box_blank
     box_line "This tool provisions real GCP billing resources." "${YELLOW}"
     box_line "Authorized use only." "${YELLOW}"
@@ -114,20 +108,6 @@ render_gate_screen() {
     echo ""
 }
 
-# ------------------------------------------------------------------------
-# ACCESS GATE
-# Only SHA-256 hashes live in this file - never the plaintext password.
-# Generate a hash for a new password on your own machine (never on a
-# shared/public one) with:
-#     printf '%s' 'your-new-password' | sha256sum | cut -d' ' -f1
-# then paste ONLY the hash below and throw away the plaintext.
-#
-# This is a "don't run this by accident / don't let a casual passerby run
-# it" gate, not encryption - there is nothing to decrypt here, a hash is
-# one-way by design. The real risk to a hash like this isn't decryption,
-# it's brute force against a short/guessable password - use long, random
-# passwords if you want this to actually resist that. Real access control
-# still belongs in your cloud IAM / repo permissions, not a bash script.
 ALLOWED_HASHES=(
     "2c443ca329d2d85d093b80349ee88cc23169eaec1698dea050920836773fb7ad"
     "718052c0d0866bb03f23d3d4f2488f2aa86c435b9fd658abecbfc4c7abf2de47"
@@ -150,7 +130,7 @@ for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
     echo ""
     INPUT_HASH=$(printf '%s' "$INPUT_PW" | sha256sum | cut -d' ' -f1)
     for h in "${ALLOWED_HASHES[@]}"; do
-        [ -z "$h" ] && continue   # skip empty/unused slots
+        [ -z "$h" ] && continue
         if [ "$INPUT_HASH" == "$h" ]; then
             authorized=1
             break 2
@@ -189,16 +169,18 @@ echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${YELLOW}1) HAProxy    - full protocol support incl. gRPC (recommended)${RESET}"
 echo -e "  ${YELLOW}2) Envoy      - full protocol support incl. gRPC (fast & stable)${RESET}"
 echo -e "  ${YELLOW}3) Caddy      - full protocol support incl. gRPC (fast & stable)${RESET}"
-echo -e "  ${YELLOW}4) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
-echo -e "  ${YELLOW}5) OpenResty  - WS/HTTPUpgrade/XHTTP only, NO gRPC (nginx limitation)${RESET}"
+echo -e "  ${YELLOW}4) H2O        - full protocol support incl. gRPC${RESET}"
+echo -e "  ${YELLOW}5) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
+echo -e "  ${YELLOW}6) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
 echo ""
-read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-5] (Default 1): ${RESET}")" ENGINE_CHOICE
+read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-6] (Default 1): ${RESET}")" ENGINE_CHOICE
 
 case "$ENGINE_CHOICE" in
     2) ENGINE="Envoy";      PROXY_ENV="envoy";;
     3) ENGINE="Caddy";      PROXY_ENV="caddy";;
-    4) ENGINE="Traefik";    PROXY_ENV="traefik";;
-    5) ENGINE="OpenResty";  PROXY_ENV="openresty";;
+    4) ENGINE="H2O";        PROXY_ENV="h2o";;
+    5) ENGINE="Traefik";    PROXY_ENV="traefik";;
+    6) ENGINE="OpenResty";  PROXY_ENV="openresty";;
     *) ENGINE="HAProxy";    PROXY_ENV="haproxy";;
 esac
 DOCKERFILE="proxies/${PROXY_ENV}/Dockerfile"
@@ -208,9 +190,9 @@ if [ ! -f "$DOCKERFILE" ]; then
 fi
 echo -e "  ${GREEN}SELECTED PROXY ENGINE: ${ENGINE}${RESET}"
 if [ "$PROXY_ENV" == "openresty" ]; then
-    echo -e "  ${YELLOW}Note: gRPC endpoints will return 501 on this engine - nginx cannot${RESET}"
+    echo -e "  ${YELLOW}Note: gRPC/H2 endpoints will return 501 on this engine - nginx cannot${RESET}"
     echo -e "  ${YELLOW}multiplex HTTP/1.1 and cleartext HTTP/2 on one port. Pick another${RESET}"
-    echo -e "  ${YELLOW}engine if you need the gRPC transport.${RESET}"
+    echo -e "  ${YELLOW}engine if you need those transports.${RESET}"
 fi
 echo ""
 
@@ -227,6 +209,56 @@ esac
 echo -e "  ${GREEN}ADS MODE: ${ADS_MODE}${RESET}"
 echo ""
 
+# ------------------------------------------------------------------------
+# SSH TUNNEL USERS (SSH-over-WS at /saeka-ssh)
+# Provisioned at CONTAINER START, not baked into the image - the same
+# pattern ADS_MODE already uses. Passwords are auto-generated here (never
+# typed, never logged) unless you choose to set your own. This builds an
+# SSH_USERS env var that entrypoint.sh reads to create forwarding-only
+# accounts (no shell, no TTY - just `ssh -D` tunnel endpoints).
+# ------------------------------------------------------------------------
+echo -e "  ${CYAN}==================================================${RESET}"
+echo -e "  ${GREEN}           SSH TUNNEL USERS (SSH-over-WS)${RESET}"
+echo -e "  ${CYAN}==================================================${RESET}"
+echo -e "  ${YELLOW}Adds forwarding-only SSH accounts at /saeka-ssh - no shell, no${RESET}"
+echo -e "  ${YELLOW}login, just a SOCKS tunnel endpoint (ssh -D). Needs ws_bridge.py${RESET}"
+echo -e "  ${YELLOW}client-side, since plain ssh doesn't speak WebSocket.${RESET}"
+echo ""
+
+SSH_USER_LIST=()
+if [ -x "$(command -v openssl)" ]; then
+    GEN_PW() { openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | head -c16; }
+else
+    GEN_PW() { < /dev/urandom tr -dc 'A-Za-z0-9' | head -c16; }
+fi
+
+read -r -p "$(echo -e "  ${CYAN}Add an SSH tunnel user? [y/N]: ${RESET}")" ADD_SSH
+while [[ "$ADD_SSH" =~ ^[Yy] ]]; do
+    read -r -p "$(echo -e "  ${CYAN}Username [saeka]: ${RESET}")" SSH_UNAME
+    SSH_UNAME=${SSH_UNAME:-saeka}
+    # Strip characters that would break the user:pass / comma / @ delimiter
+    # scheme below (also keeps sshd/useradd happy with the result).
+    SSH_UNAME=$(printf '%s' "$SSH_UNAME" | tr -dc 'A-Za-z0-9_-')
+    read -r -p "$(echo -e "  ${CYAN}Password (blank = auto-generate): ${RESET}")" SSH_PW
+    if [ -z "$SSH_PW" ]; then
+        SSH_PW=$(GEN_PW)
+        echo -e "  ${GREEN}Generated password for ${SSH_UNAME}: ${SSH_PW}${RESET}"
+        echo -e "  ${YELLOW}(shown once - write it down now)${RESET}"
+    fi
+    SSH_USER_LIST+=("${SSH_UNAME}:${SSH_PW}")
+    echo ""
+    read -r -p "$(echo -e "  ${CYAN}Add another? [y/N]: ${RESET}")" ADD_SSH
+done
+
+SSH_USERS_CSV=""
+if [ "${#SSH_USER_LIST[@]}" -gt 0 ]; then
+    SSH_USERS_CSV=$(IFS=,; echo "${SSH_USER_LIST[*]}")
+    echo -e "  ${GREEN}${#SSH_USER_LIST[@]} SSH tunnel user(s) configured.${RESET}"
+else
+    echo -e "  ${YELLOW}No SSH tunnel users added - /saeka-ssh will run but nothing can authenticate.${RESET}"
+fi
+echo ""
+
 if [ -f "./regions.sh" ]; then
     source ./regions.sh
 else
@@ -236,8 +268,6 @@ fi
 
 read -r -p "$(echo -e "  ${CYAN}SERVICE NAME [saeka]: ${RESET}")" INPUT_NAME
 SERVICE_NAME=${INPUT_NAME:-saeka}
-# Cloud Run service names are per-region/per-project, but different engines
-# sharing one name would overwrite each other's image - suffix it.
 IMAGE_TAG="${SERVICE_NAME}-${PROXY_ENV}"
 
 echo ""
@@ -261,17 +291,6 @@ case "$MODE_CHOICE" in
     *) CPU="1"; RAM="2Gi"; MODE="BROWSING"; MAX_INSTANCES="4";;
 esac
 
-# ------------------------------------------------------------------------
-# QUIET RUNNER
-# Runs a command with its stdout/stderr fully captured to a log file and
-# NOTHING streamed to the terminal - just a small animated "working" line
-# while it runs. On success the line is replaced with a one-line OK and
-# the log file is deleted. On failure the line is replaced with a FAILED
-# marker and the last 30 lines of the log are printed so you still get a
-# real error message, not a silent black box.
-#
-# Usage: run_quiet "Building Traefik image" build.log gcloud builds submit ...
-# ------------------------------------------------------------------------
 run_quiet() {
     local label="$1" logfile="$2"
     shift 2
@@ -299,13 +318,6 @@ run_quiet() {
     fi
 }
 
-# ------------------------------------------------------------------------
-# BUILD - a small generated cloudbuild.yaml points Cloud Build at the
-# chosen engine's Dockerfile while the build context stays the repo root
-# (so proxies/<engine>/* and common/* are both reachable via COPY).
-# Output is fully suppressed unless the build fails (see run_quiet above)
-# - no wall of Docker/Cloud Build log lines on a normal run.
-# ------------------------------------------------------------------------
 CB_CONFIG=$(mktemp)
 cat > "$CB_CONFIG" <<YAML
 steps:
@@ -322,9 +334,19 @@ if ! run_quiet "Building ${ENGINE} image" build.log \
 fi
 rm -f "$CB_CONFIG"
 
-# Quota-safe deploy: try the chosen tier, step down automatically rather
-# than failing outright on restrictive quotas. Each attempt is quiet too -
-# only the final failure (after all tiers are exhausted) prints its log.
+if [ -n "$SSH_USERS_CSV" ]; then
+    # SSH_USERS_CSV already contains both ',' (between users) and ':'
+    # (inside each user:pass pair), so gcloud's normal comma-delimited
+    # --set-env-vars can't carry it safely alongside ADS_MODE. The
+    # "^SEP^" prefix switches the delimiter for the WHOLE value to
+    # something that appears in neither var - '@' never shows up in
+    # ADS_MODE, in a generated password (alphanumeric only), or in any
+    # reasonable username.
+    ENV_VARS="^@^ADS_MODE=${ADS_MODE}@SSH_USERS=${SSH_USERS_CSV}"
+else
+    ENV_VARS="ADS_MODE=${ADS_MODE}"
+fi
+
 deploy_attempt() {
     local cpu="$1" mem="$2" maxi="$3"
     shift 3
@@ -334,7 +356,7 @@ deploy_attempt() {
         --cpu "$cpu" --memory "$mem" --port 8080 \
         --max-instances "$maxi" \
         --timeout 3600 --allow-unauthenticated --project="$PROJECT_ID" \
-        --set-env-vars "ADS_MODE=${ADS_MODE}" \
+        --set-env-vars "$ENV_VARS" \
         --quiet "$@"
 }
 
@@ -368,21 +390,24 @@ echo ""
 echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
 echo -e "  ${CYAN}                    PATHS & PROTOCOLS${RESET}"
 echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
-echo -e "  ${GREEN}VLESS${RESET}        | WS: /vless-saeka   | HU: /vless-saeka-hu   | XH: /vless-saeka-xh   | gRPC: /vless-saeka-grpc"
-echo -e "  ${GREEN}VMess${RESET}        | WS: /vmess-saeka   | HU: /vmess-saeka-hu   | XH: /vmess-saeka-xh   | gRPC: /vmess-saeka-grpc"
-echo -e "  ${GREEN}TROJAN${RESET}       | WS: /saeka-tojirp  | HU: /saeka-tojirp-hu  | XH: /saeka-tojirp-xh  | gRPC: /saeka-tojirp-grpc"
-echo -e "  ${GREEN}Shadowsocks${RESET}  | WS: /ss-saeka      | HU: /ss-saeka-hu      | XH: /ss-saeka-xh      | gRPC: /ss-saeka-grpc"
+echo -e "  ${GREEN}VLESS${RESET}        | WS: /vless-saeka   | HU: /vless-saeka-hu   | XH: /vless-saeka-xh   | gRPC: /vless-saeka-grpc   | H2: /vless-saeka-h2"
+echo -e "  ${GREEN}VMess${RESET}        | WS: /vmess-saeka   | HU: /vmess-saeka-hu   | XH: /vmess-saeka-xh   | gRPC: /vmess-saeka-grpc   | H2: /vmess-saeka-h2"
+echo -e "  ${GREEN}TROJAN${RESET}       | WS: /saeka-tojirp  | HU: /saeka-tojirp-hu  | XH: /saeka-tojirp-xh  | gRPC: /saeka-tojirp-grpc  | H2: /saeka-tojirp-h2"
+echo -e "  ${GREEN}Shadowsocks${RESET}  | WS: /ss-saeka      | HU: /ss-saeka-hu      | XH: /ss-saeka-xh      | gRPC: /ss-saeka-grpc      | H2: /ss-saeka-h2"
+echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
+if [ -n "$SSH_USERS_CSV" ]; then
+    echo -e "  ${GREEN}SSH-WS${RESET}       | /saeka-ssh  (needs ws_bridge.py client-side - plain ssh can't speak WS)"
+    echo -e "  ${CYAN}  python3 ws_bridge.py --local-port 2222 --remote wss://${CLEAN_HOST}/saeka-ssh${RESET}"
+    echo -e "  ${CYAN}  ssh -p 2222 -o UserKnownHostsFile=/dev/null <user>@127.0.0.1${RESET}"
+fi
 echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
 if [ "$PROXY_ENV" == "openresty" ]; then
-    echo -e "  ${YELLOW}gRPC paths above will return 501 on OpenResty - see engine note.${RESET}"
+    echo -e "  ${YELLOW}gRPC/H2 paths above will return 501 on OpenResty - see engine note.${RESET}"
 fi
 echo ""
 
 FINAL_HOST="$CLEAN_HOST"
 
-# ------------------------------------------------------------------------
-# CUSTOM DOMAIN & UNIVERSAL SNI LOAD BALANCER
-# ------------------------------------------------------------------------
 echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${GREEN}       CUSTOM DOMAIN & UNIVERSAL SNI MANAGER${RESET}"
 echo -e "  ${CYAN}==================================================${RESET}"
@@ -393,6 +418,30 @@ echo -e "  ${WHITE}3) Type LOCAL     : ${YELLOW}Instantly uploads your own 'cert
 echo ""
 read -r -p "$(echo -e "  ${CYAN}Input (Domain / UNIVERSAL / LOCAL) or blank to skip: ${RESET}")" LB_INPUT
 
+if [ -n "$LB_INPUT" ] && [ "$LB_INPUT" != "UNIVERSAL" ] && [ "$LB_INPUT" != "LOCAL" ]; then
+    echo -e "  ${CYAN}Checking that ${LB_INPUT} actually resolves before touching the LB...${RESET}"
+    DOMAIN_UP=0
+    for _ in $(seq 1 3); do
+        HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "https://${LB_INPUT}" 2>/dev/null || echo "000")
+        RESOLVES=$(getent ahostsv4 "$LB_INPUT" 2>/dev/null | head -n1)
+        if [ -n "$RESOLVES" ] || [ "$HTTP_CODE" != "000" ]; then
+            DOMAIN_UP=1
+            break
+        fi
+        sleep 2
+    done
+    if [ "$DOMAIN_UP" -eq 0 ]; then
+        echo -e "  ${RED}${LB_INPUT} isn't resolving / responding right now.${RESET}"
+        read -r -p "$(echo -e "  ${CYAN}Use it anyway? [y/N]: ${RESET}")" FORCE_DOMAIN
+        if [[ ! "$FORCE_DOMAIN" =~ ^[Yy] ]]; then
+            LB_INPUT=""
+            echo -e "  ${YELLOW}Skipping the domain/LB step.${RESET}"
+        fi
+    else
+        echo -e "  ${GREEN}${LB_INPUT} responds - proceeding.${RESET}"
+    fi
+fi
+
 FINAL_HOST="$CLEAN_HOST"
 if [ -n "$LB_INPUT" ]; then
     IP_NAME="${SERVICE_NAME}-ip"
@@ -401,19 +450,16 @@ if [ -n "$LB_INPUT" ]; then
     URLMAP_NAME="${SERVICE_NAME}-urlmap"
     HTTPS_PROXY_NAME="${SERVICE_NAME}-https-proxy"
     FWD_RULE_NAME="${SERVICE_NAME}-https-fwd"
-    CERT_NAME="${SERVICE_NAME}-cert-$(date +%s)"
     lb_setup_failed=0
 
     gcloud services enable compute.googleapis.com --project="$PROJECT_ID" >/dev/null 2>&1 || true
 
-    # 1. Static global IP
     if ! gcloud compute addresses describe "$IP_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Reserving static IP" lb.log \
             gcloud compute addresses create "$IP_NAME" --global --project="$PROJECT_ID" || lb_setup_failed=1
     fi
     STATIC_IP=$(gcloud compute addresses describe "$IP_NAME" --global --project="$PROJECT_ID" --format='value(address)' 2>/dev/null)
 
-    # 2. Serverless NEG
     if ! gcloud compute network-endpoint-groups describe "$NEG_NAME" --region="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating serverless NEG" lb.log \
             gcloud compute network-endpoint-groups create "$NEG_NAME" \
@@ -421,7 +467,6 @@ if [ -n "$LB_INPUT" ]; then
                 --cloud-run-service="$SERVICE_NAME" --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
-    # 3. Backend service
     if ! gcloud compute backend-services describe "$BACKEND_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating backend service" lb.log \
             gcloud compute backend-services create "$BACKEND_NAME" --global --project="$PROJECT_ID" || lb_setup_failed=1
@@ -431,14 +476,12 @@ if [ -n "$LB_INPUT" ]; then
                 --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
-    # 4. URL map
     if ! gcloud compute url-maps describe "$URLMAP_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating URL map" lb.log \
             gcloud compute url-maps create "$URLMAP_NAME" --default-service="$BACKEND_NAME" \
                 --global --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
-   # 5. Certificate Generation (Hybrid SSL Injection)
     CERT_TEMP="${SERVICE_NAME}-tmp-$(date +%s)"
     CERT_MANAGED="${SERVICE_NAME}-mng-$(date +%s)"
 
@@ -452,10 +495,22 @@ if [ -n "$LB_INPUT" ]; then
             gcloud compute ssl-certificates create "$CERT_TEMP" \
                 --certificate=cert.pem --private-key=key.pem \
                 --global --project="$PROJECT_ID" || lb_setup_failed=1
-        
+
         rm -f key.pem cert.pem
         FINAL_CERTS="$CERT_TEMP"
         FINAL_HOST="$STATIC_IP"
+    elif [ "$LB_INPUT" == "LOCAL" ]; then
+        if [ ! -f cert.pem ] || [ ! -f key.pem ]; then
+            echo -e "  ${RED}cert.pem / key.pem not found in ${SCRIPT_DIR} - aborting LB step.${RESET}"
+            lb_setup_failed=1
+        else
+            run_quiet "Uploading your cert.pem/key.pem to GCP" lb.log \
+                gcloud compute ssl-certificates create "$CERT_TEMP" \
+                    --certificate=cert.pem --private-key=key.pem \
+                    --global --project="$PROJECT_ID" || lb_setup_failed=1
+            FINAL_CERTS="$CERT_TEMP"
+            FINAL_HOST="$STATIC_IP"
+        fi
     else
         echo -e "  ${CYAN}Applying Hybrid SSL (Instant Temp + Background Managed)...${RESET}"
         DOMAINS_FILE="${SCRIPT_DIR}/.domains-${SERVICE_NAME}.list"
@@ -463,7 +518,6 @@ if [ -n "$LB_INPUT" ]; then
         grep -qxF "$LB_INPUT" "$DOMAINS_FILE" || echo "$LB_INPUT" >> "$DOMAINS_FILE"
         DOMAINS_CSV=$(paste -sd, "$DOMAINS_FILE")
 
-        # 5a. Create quick self-signed for instant access right now
         openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
             -keyout key.pem -out cert.pem -subj "/CN=${LB_INPUT}" 2>/dev/null
         run_quiet "Uploading instant temporary cert" lb.log \
@@ -472,29 +526,25 @@ if [ -n "$LB_INPUT" ]; then
                 --global --project="$PROJECT_ID" || lb_setup_failed=1
         rm -f key.pem cert.pem
 
-        # 5b. Request real managed cert in background
         run_quiet "Requesting real managed cert for ${DOMAINS_CSV}" lb.log \
             gcloud compute ssl-certificates create "$CERT_MANAGED" \
                 --domains="$DOMAINS_CSV" --global --project="$PROJECT_ID" || lb_setup_failed=1
-        
+
         FINAL_CERTS="${CERT_TEMP},${CERT_MANAGED}"
         FINAL_HOST="$LB_INPUT"
     fi
 
-    # 6. Target HTTPS proxy
     if ! gcloud compute target-https-proxies describe "$HTTPS_PROXY_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating HTTPS proxy with cert(s)" lb.log \
             gcloud compute target-https-proxies create "$HTTPS_PROXY_NAME" \
                 --url-map="$URLMAP_NAME" --ssl-certificates="$FINAL_CERTS" \
                 --global --project="$PROJECT_ID" || lb_setup_failed=1
     else
-        # Keep things clean, repoint to new certs
         run_quiet "Repointing HTTPS proxy to new cert(s)" lb.log \
             gcloud compute target-https-proxies update "$HTTPS_PROXY_NAME" \
                 --ssl-certificates="$FINAL_CERTS" --global --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
-    # 7. Forwarding rule
     if ! gcloud compute forwarding-rules describe "$FWD_RULE_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating forwarding rule" lb.log \
             gcloud compute forwarding-rules create "$FWD_RULE_NAME" \
@@ -504,15 +554,20 @@ if [ -n "$LB_INPUT" ]; then
 
     if [ "$lb_setup_failed" -eq 0 ]; then
         echo ""
-        echo -e "  ${GREEN}Load Balancer ready with Hybrid SSL.${RESET}"
+        echo -e "  ${GREEN}Load Balancer ready.${RESET}"
         echo -e "  ${CYAN}STATIC IP: ${GREEN}${STATIC_IP}${RESET}"
         if [ "$LB_INPUT" == "UNIVERSAL" ]; then
             echo -e "  ${YELLOW}Universal Mode active. Use ANY domain or IP directly.${RESET}"
-            echo -e "  ${YELLOW}Client apps MUST have 'allowInsecure' set to true.${RESET}"
+            echo -e "  ${YELLOW}Client apps MUST have 'allowInsecure' set to true - that also means${RESET}"
+            echo -e "  ${YELLOW}TLS validation is off entirely, so this connection can be intercepted${RESET}"
+            echo -e "  ${YELLOW}by anyone on the network path. Fine for testing, not for real traffic.${RESET}"
+        elif [ "$LB_INPUT" == "LOCAL" ]; then
+            echo -e "  ${YELLOW}Using your own cert.pem/key.pem. Point DNS at the static IP above.${RESET}"
         else
             echo -e "  ${CYAN}Domains currently on the cert: ${GREEN}${DOMAINS_CSV}${RESET}"
             echo -e "  ${YELLOW}1. Point DNS A records for all these domains to the static IP.${RESET}"
-            echo -e "  ${YELLOW}2. You can connect IMMEDIATELY by setting 'allowInsecure: true' in your app.${RESET}"
+            echo -e "  ${YELLOW}2. You can connect IMMEDIATELY by setting 'allowInsecure: true' in your app${RESET}"
+            echo -e "  ${YELLOW}   (same MITM caveat as Universal Mode above, until the real cert lands).${RESET}"
             echo -e "  ${YELLOW}3. In ~60 mins, Google will finish the real cert. You can then disable 'allowInsecure'.${RESET}"
         fi
     else
