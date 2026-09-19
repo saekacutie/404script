@@ -509,9 +509,10 @@
         ]
       },
       "streamSettings": {
-        "network": "http",
-        "httpSettings": {
-          "path": "/saeka-tojirp-h2"
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/saeka-tojirp-h2",
+          "mode": "stream-one"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -541,9 +542,10 @@
         ]
       },
       "streamSettings": {
-        "network": "http",
-        "httpSettings": {
-          "path": "/vmess-saeka-h2"
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/vmess-saeka-h2",
+          "mode": "stream-one"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -573,9 +575,10 @@
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "http",
-        "httpSettings": {
-          "path": "/vless-saeka-h2"
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/vless-saeka-h2",
+          "mode": "stream-one"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -605,32 +608,15 @@
         ]
       },
       "streamSettings": {
-        "network": "http",
-        "httpSettings": {
-          "path": "/ss-saeka-h2"
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/ss-saeka-h2",
+          "mode": "stream-one"
         },
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
           "tcpKeepAliveInterval": 15
-        }
-      }
-    },
-    {
-      "port": 10020,
-      "listen": "127.0.0.1",
-      "protocol": "dokodemo-door",
-      "tag": "ssh-ws",
-      "settings": {
-        "address": "127.0.0.1",
-        "port": 22,
-        "network": "tcp",
-        "followRedirect": false
-      },
-      "streamSettings": {
-        "network": "ws",
-        "wsSettings": {
-          "path": "/saeka-ssh"
         }
       }
     }
@@ -670,8 +656,7 @@
           "trojan-h2",
           "vmess-h2",
           "vless-h2",
-          "ss-h2",
-          "ssh-ws"
+          "ss-h2"
         ],
         "outboundTag": "direct"
       }
