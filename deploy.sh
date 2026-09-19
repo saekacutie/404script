@@ -106,7 +106,7 @@ render_gate_screen() {
     box_line "HAProxy · Envoy · Caddy · Traefik · OpenResty"
     box_blank
     box_line "SUPPORTED TRANSPORTS" "${BOLD}${CYAN}"
-    box_line "WebSocket · HTTPUpgrade · XHTTP · gRPC*"
+    box_line "WebSocket · HTTPUpgrade · h2 · XHTTP · gRPC*"
     box_line "(*gRPC unsupported on OpenResty)" "${YELLOW}"
     box_blank
     box_line "This tool provisions real GCP billing resources." "${YELLOW}"
