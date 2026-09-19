@@ -76,14 +76,14 @@ box_line() {
 # picked at random each run.
 # ------------------------------------------------------------------------
 GREET_OPEN=(
-    "Welcome back,"     "Good to see you,"   "Hello again,"      "Systems nominal,"
-    "Standing by,"      "Greetings,"         "All clear,"        "Access point live,"
-    "Terminal awake,"   "Ready when you are,"
+    "Welcome back,"      "Good to see you,"   "Hello again,"      "Systems nominal,"
+    "Standing by,"       "Greetings,"         "All clear,"        "Access point live,"
+    "Terminal awake,"    "Ready when you are,"
 )
 GREET_CLOSE=(
-    "operator."         "commander."         "engineer."         "deployer."
+    "operator."          "commander."         "engineer."         "deployer."
     "let's ship something." "the grid awaits."  "your keys, please." "time to deploy."
-    "stay sharp."       "no rush."
+    "stay sharp."        "no rush."
 )
 GREET_IDX=$(( RANDOM % 100 ))
 GREETING="${GREET_OPEN[$(( GREET_IDX / 10 ))]} ${GREET_CLOSE[$(( GREET_IDX % 10 ))]}"
@@ -184,7 +184,7 @@ echo -e "  ${CYAN}PROJECT: ${GREEN}${PROJECT_ID}${RESET}"
 echo ""
 
 echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${GREEN}             CHOOSE PROXY ENGINE${RESET}"
+echo -e "  ${GREEN}              CHOOSE PROXY ENGINE${RESET}"
 echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${YELLOW}1) HAProxy    - full protocol support incl. gRPC (recommended)${RESET}"
 echo -e "  ${YELLOW}2) Envoy      - full protocol support incl. gRPC (fast & stable)${RESET}"
@@ -192,7 +192,7 @@ echo -e "  ${YELLOW}3) Caddy      - full protocol support incl. gRPC (fast & sta
 echo -e "  ${YELLOW}4) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
 echo -e "  ${YELLOW}5) OpenResty  - WS/HTTPUpgrade/XHTTP only, NO gRPC (nginx limitation)${RESET}"
 echo ""
-read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-6] (Default 1): ${RESET}")" ENGINE_CHOICE
+read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-5] (Default 1): ${RESET}")" ENGINE_CHOICE
 
 case "$ENGINE_CHOICE" in
     2) ENGINE="Envoy";      PROXY_ENV="envoy";;
@@ -242,9 +242,9 @@ IMAGE_TAG="${SERVICE_NAME}-${PROXY_ENV}"
 
 echo ""
 echo -e "  ${CYAN}SELECT MODE:${RESET}"
-echo -e "  ${YELLOW}1) BROWSING     (1 vCPU / 2Gi  RAM)${RESET}"
-echo -e "  ${YELLOW}2) STREAMING    (2 vCPU / 4Gi  RAM)${RESET}"
-echo -e "  ${YELLOW}3) GAMING       (4 vCPU / 8Gi  RAM)${RESET}"
+echo -e "  ${YELLOW}1) BROWSING      (1 vCPU / 2Gi  RAM)${RESET}"
+echo -e "  ${YELLOW}2) STREAMING     (2 vCPU / 4Gi  RAM)${RESET}"
+echo -e "  ${YELLOW}3) GAMING        (4 vCPU / 8Gi  RAM)${RESET}"
 echo -e "  ${YELLOW}4) CUSTOM${RESET}"
 echo ""
 read -r -p "$(echo -e "  ${CYAN}CHOICE: ${RESET}")" MODE_CHOICE
@@ -378,64 +378,47 @@ if [ "$PROXY_ENV" == "openresty" ]; then
 fi
 echo ""
 
-# ------------------------------------------------------------------------
-# CUSTOM DOMAIN (optional) - Global HTTPS Load Balancer, not domain-mappings
-#
-# `gcloud run domain-mappings create` requires proving ownership through
-# Search Console first, which is the friction point this replaces. This
-# instead puts a Global External HTTPS Load Balancer (static IP + serverless
-# NEG + backend service + URL map + Google-managed cert) in front of the
-# SAME Cloud Run service. Google issues the cert automatically once your
-# domain's DNS A record resolves to the static IP - no manual verification
-# step. This is purely additive: the plain *.run.app URL and a normal
-# `gcloud run deploy` keep working exactly as before, untouched by any of
-# this. Re-run the script with the same SERVICE_NAME to add more domains -
-# each one gets appended to the same load balancer and cert.
-#
-# Every domain that's ever been added for this service is tracked in a
-# local file (.domains-<service>.list) so re-runs know the full set to put
-# on the certificate. Managed certs are immutable once created, so adding
-# a domain mints a new cert and repoints the HTTPS proxy at it, then drops
-# the old one - the load balancer, static IP and backend stay the same.
-# ------------------------------------------------------------------------
-echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${GREEN}             CUSTOM DOMAIN (OPTIONAL)${RESET}"
-echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${YELLOW}Sets up a Global HTTPS Load Balancer in front of Cloud Run.${RESET}"
-echo -e "  ${YELLOW}No Search Console ownership verification - point the domain's${RESET}"
-echo -e "  ${YELLOW}DNS A record at the static IP printed below and Google issues${RESET}"
-echo -e "  ${YELLOW}the cert automatically once DNS resolves.${RESET}"
-echo ""
-read -r -p "$(echo -e "  ${CYAN}Domain to map (blank to skip): ${RESET}")" CUSTOM_DOMAIN
-
 FINAL_HOST="$CLEAN_HOST"
-if [ -n "$CUSTOM_DOMAIN" ]; then
-    DOMAINS_FILE="${SCRIPT_DIR}/.domains-${SERVICE_NAME}.list"
-    touch "$DOMAINS_FILE"
-    grep -qxF "$CUSTOM_DOMAIN" "$DOMAINS_FILE" || echo "$CUSTOM_DOMAIN" >> "$DOMAINS_FILE"
-    DOMAINS_CSV=$(paste -sd, "$DOMAINS_FILE")
 
+# ------------------------------------------------------------------------
+# UNIVERSAL SNI / IP LOAD BALANCER (Self-Signed)
+#
+# Replaces the Google-managed cert with a self-signed fallback certificate.
+# This allows the static IP to complete the TLS handshake for ANY domain,
+# arbitrary SNI, or direct IP connection instantly. No Search Console
+# verification or DNS A record propagation wait time is required.
+# ------------------------------------------------------------------------
+echo -e "  ${CYAN}==================================================${RESET}"
+echo -e "  ${GREEN}       UNIVERSAL SNI / IP GRABBER (LB)${RESET}"
+echo -e "  ${CYAN}==================================================${RESET}"
+echo -e "  ${YELLOW}Provisions a Global HTTPS Load Balancer with a self-signed${RESET}"
+echo -e "  ${YELLOW}certificate. This allows you to point ANY domain to the IP,${RESET}"
+echo -e "  ${YELLOW}or use arbitrary SNIs directly without DNS validation.${RESET}"
+echo ""
+read -r -p "$(echo -e "  ${CYAN}Setup Universal Load Balancer? [y/N]: ${RESET}")" SETUP_LB
+
+if [[ "$SETUP_LB" =~ ^[Yy]$ ]]; then
     IP_NAME="${SERVICE_NAME}-ip"
     NEG_NAME="${SERVICE_NAME}-neg"
     BACKEND_NAME="${SERVICE_NAME}-backend"
     URLMAP_NAME="${SERVICE_NAME}-urlmap"
     HTTPS_PROXY_NAME="${SERVICE_NAME}-https-proxy"
     FWD_RULE_NAME="${SERVICE_NAME}-https-fwd"
-    CERT_NAME="${SERVICE_NAME}-cert-$(date +%s)"
+    CERT_NAME="${SERVICE_NAME}-selfsigned-$(date +%s)"
     lb_setup_failed=0
 
-    echo -e "  ${CYAN}Provisioning load balancer for: ${GREEN}${DOMAINS_CSV}${RESET}"
+    echo -e "  ${CYAN}Provisioning Universal SNI Load Balancer...${RESET}"
 
     gcloud services enable compute.googleapis.com --project="$PROJECT_ID" >/dev/null 2>&1 || true
 
-    # 1. Static global IP - reused across runs/domains once reserved.
+    # 1. Static global IP
     if ! gcloud compute addresses describe "$IP_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Reserving static IP" lb.log \
             gcloud compute addresses create "$IP_NAME" --global --project="$PROJECT_ID" || lb_setup_failed=1
     fi
     STATIC_IP=$(gcloud compute addresses describe "$IP_NAME" --global --project="$PROJECT_ID" --format='value(address)' 2>/dev/null)
 
-    # 2. Serverless NEG pointing straight at this Cloud Run service.
+    # 2. Serverless NEG
     if ! gcloud compute network-endpoint-groups describe "$NEG_NAME" --region="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating serverless NEG" lb.log \
             gcloud compute network-endpoint-groups create "$NEG_NAME" \
@@ -443,7 +426,7 @@ if [ -n "$CUSTOM_DOMAIN" ]; then
                 --cloud-run-service="$SERVICE_NAME" --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
-    # 3. Backend service wrapping the NEG.
+    # 3. Backend service
     if ! gcloud compute backend-services describe "$BACKEND_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating backend service" lb.log \
             gcloud compute backend-services create "$BACKEND_NAME" --global --project="$PROJECT_ID" || lb_setup_failed=1
@@ -453,20 +436,26 @@ if [ -n "$CUSTOM_DOMAIN" ]; then
                 --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
-    # 4. URL map - single default service, every domain shares it.
+    # 4. URL map
     if ! gcloud compute url-maps describe "$URLMAP_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating URL map" lb.log \
             gcloud compute url-maps create "$URLMAP_NAME" --default-service="$BACKEND_NAME" \
                 --global --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
-    # 5. Google-managed cert covering every domain seen so far.
-    run_quiet "Requesting managed cert for ${DOMAINS_CSV}" lb.log \
-        gcloud compute ssl-certificates create "$CERT_NAME" \
-            --domains="$DOMAINS_CSV" --global --project="$PROJECT_ID" || lb_setup_failed=1
+    # 5. Generate and upload Self-Signed Certificate
+    run_quiet "Generating self-signed cert for universal SNI" lb.log \
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout key.pem -out cert.pem -subj "/CN=cloudfront.net" 2>/dev/null
 
-    # 6. Target HTTPS proxy - create once, repoint at the new cert on
-    #    later runs (and drop the now-unused old cert).
+    run_quiet "Uploading self-managed cert to GCP" lb.log \
+        gcloud compute ssl-certificates create "$CERT_NAME" \
+            --certificate=cert.pem --private-key=key.pem \
+            --global --project="$PROJECT_ID" || lb_setup_failed=1
+    
+    rm -f key.pem cert.pem
+
+    # 6. Target HTTPS proxy
     if ! gcloud compute target-https-proxies describe "$HTTPS_PROXY_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating HTTPS proxy" lb.log \
             gcloud compute target-https-proxies create "$HTTPS_PROXY_NAME" \
@@ -482,7 +471,7 @@ if [ -n "$CUSTOM_DOMAIN" ]; then
         fi
     fi
 
-    # 7. Forwarding rule - the actual :443 entry point on the static IP.
+    # 7. Forwarding rule
     if ! gcloud compute forwarding-rules describe "$FWD_RULE_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating forwarding rule" lb.log \
             gcloud compute forwarding-rules create "$FWD_RULE_NAME" \
@@ -492,16 +481,13 @@ if [ -n "$CUSTOM_DOMAIN" ]; then
 
     if [ "$lb_setup_failed" -eq 0 ]; then
         echo ""
-        echo -e "  ${GREEN}Load balancer ready. Point this domain's DNS A record at:${RESET}"
-        echo -e "  ${GREEN}${STATIC_IP}${RESET}"
-        echo -e "  ${CYAN}Domains currently on the cert: ${GREEN}${DOMAINS_CSV}${RESET}"
-        echo -e "  ${YELLOW}No Search Console verification needed - once DNS resolves,${RESET}"
-        echo -e "  ${YELLOW}Google auto-issues the cert (usually 15-60 min, sometimes longer).${RESET}"
-        echo -e "  ${YELLOW}Check status with:${RESET}"
-        echo -e "  ${GREEN}gcloud compute ssl-certificates describe ${CERT_NAME} --global --project=${PROJECT_ID} --format='value(managed.status)'${RESET}"
-        echo -e "  ${YELLOW}Re-run this script with SERVICE_NAME=${SERVICE_NAME} and a new domain${RESET}"
-        echo -e "  ${YELLOW}to add it to this same load balancer/cert later.${RESET}"
-        FINAL_HOST="$CUSTOM_DOMAIN"
+        echo -e "  ${GREEN}Universal Load Balancer Ready.${RESET}"
+        echo -e "  ${CYAN}STATIC IP: ${GREEN}${STATIC_IP}${RESET}"
+        echo -e "  ${YELLOW}You can now point ANY domain to this IP, or use it directly.${RESET}"
+        echo -e "  ${YELLOW}IMPORTANT: Because this uses a self-signed cert, your client apps${RESET}"
+        echo -e "  ${YELLOW}(v2rayNG, NekoBox, HTTP Custom, etc.) MUST have 'allowInsecure'${RESET}"
+        echo -e "  ${YELLOW}enabled to bypass the certificate warning during handshake.${RESET}"
+        FINAL_HOST="$STATIC_IP"
     else
         echo -e "  ${RED}Load balancer setup hit an error above - falling back to the raw Cloud Run host.${RESET}"
     fi
