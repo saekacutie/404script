@@ -9,7 +9,8 @@ RUN curl -fsSL -o /tmp/xray.zip \
 
 FROM traefik:v3.1
 USER root
-RUN apk add --no-cache bash openssh openssh-server shadow ca-certificates
+RUN apk add --no-cache bash openssh openssh-server shadow ca-certificates && \
+    apk add --no-cache h2o --repository=http://dl-cdn.alpinelinux.org/alpine/edge/testing/
 
 COPY --from=xray-fetch /out/xray /usr/local/bin/xray
 RUN mkdir -p /etc/xray
