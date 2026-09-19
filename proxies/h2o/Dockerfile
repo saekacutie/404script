@@ -8,6 +8,7 @@ RUN curl -fsSL -o /tmp/xray.zip \
     && chmod +x /out/xray
 
 FROM alpine:3.20
+USER root
 RUN apk add --no-cache bash openssh openssh-server shadow ca-certificates h2o
 
 COPY --from=xray-fetch /out/xray /usr/local/bin/xray

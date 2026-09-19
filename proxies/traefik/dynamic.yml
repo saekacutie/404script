@@ -1,11 +1,13 @@
 http:
   routers:
-    # SSH-over-WS (raw byte tunnel). OpenVPN-over-WS removed: needs a
-    # TUN device Cloud Run's sandbox never grants; OpenVPN lives on the
-    # companion VM instead.
+    # --- SSH-over-WS / OpenVPN-over-WS (raw byte tunnels) ---
     ssh-ws:
       rule: "PathPrefix(`/saeka-ssh`)"
       service: ssh-ws-svc
+      priority: 90
+    ovpn-ws:
+      rule: "PathPrefix(`/saeka-ovpn`)"
+      service: ovpn-ws-svc
       priority: 90
 
     # --- TROJAN (higher priority = matched first; grpc/hu/xh before bare ws) ---
@@ -102,6 +104,9 @@ http:
     ssh-ws-svc:
       loadBalancer:
         servers: [{url: "http://127.0.0.1:10020"}]
+    ovpn-ws-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10021"}]
 
     # gRPC backends use the h2c:// scheme so Traefik speaks cleartext
     # HTTP/2 to Xray's gRPC inbound instead of HTTP/1.1.

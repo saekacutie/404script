@@ -8,6 +8,7 @@ RUN curl -fsSL -o /tmp/xray.zip \
     && chmod +x /out/xray
 
 FROM traefik:v3.1
+USER root
 RUN apk add --no-cache bash openssh openssh-server shadow ca-certificates
 
 COPY --from=xray-fetch /out/xray /usr/local/bin/xray

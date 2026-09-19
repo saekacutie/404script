@@ -25,12 +25,14 @@ static_resources:
               - match: { prefix: "/health" }
                 direct_response: { status: 200, body: { inline_string: "OK" } }
 
-              # SSH-over-WS - raw byte tunnel via Xray's dokodemo-door
-              # inbound. (OpenVPN-over-WS removed: needs a TUN device,
-              # which Cloud Run's sandbox never grants. OpenVPN lives on
-              # the companion VM from deploy_vm.py instead.)
+              # SSH-over-WS / OpenVPN-over-WS - raw byte tunnels via
+              # Xray's dokodemo-door inbound, same WS pattern as everything
+              # else here. Paths don't overlap any other prefix, so order
+              # relative to the rest doesn't matter.
               - match: { prefix: "/saeka-ssh" }
                 route: { cluster: xray_10020, timeout: 0s, idle_timeout: 0s }
+              - match: { prefix: "/saeka-ovpn" }
+                route: { cluster: xray_10021, timeout: 0s, idle_timeout: 0s }
 
               # Trojan (Reordered longest prefix first)
               - match: { prefix: "/saeka-tojirp-grpc" }
@@ -210,7 +212,7 @@ static_resources:
       - lb_endpoints:
         - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10011 } } }
 
-  # SSH-over-WS raw byte tunnel (HTTP/1.1, no h2)
+  # SSH-over-WS / OpenVPN-over-WS raw byte tunnels (HTTP/1.1, no h2)
   - name: xray_10020
     type: STATIC
     connect_timeout: 1s
@@ -219,6 +221,14 @@ static_resources:
       endpoints:
       - lb_endpoints:
         - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10020 } } }
+  - name: xray_10021
+    type: STATIC
+    connect_timeout: 1s
+    load_assignment:
+      cluster_name: xray_10021
+      endpoints:
+      - lb_endpoints:
+        - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10021 } } }
 
   # gRPC Clusters (HTTP/2 enabled)
   - name: xray_10012

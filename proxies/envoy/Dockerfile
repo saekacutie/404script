@@ -11,6 +11,7 @@ RUN curl -fsSL -o /tmp/xray.zip \
     && chmod +x /out/xray
 
 FROM debian:bookworm-slim
+USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl gnupg ca-certificates openssh-server \
     && curl -fsSL https://apt.envoyproxy.io/signing.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/envoy.gpg \
