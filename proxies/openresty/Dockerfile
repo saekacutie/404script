@@ -1,6 +1,4 @@
 # docker build -f proxies/openresty/Dockerfile -t IMAGE .
-# NOTE: this engine cannot serve gRPC (see comment at the top of nginx.conf) -
-# it only does WS / HTTPUpgrade / XHTTP.
 FROM alpine:3.20 AS xray-fetch
 RUN apk add --no-cache curl unzip ca-certificates
 RUN curl -fsSL -o /tmp/xray.zip \
@@ -16,6 +14,9 @@ COPY common/config-ads.json   /etc/xray/config-ads.json
 COPY common/config-noads.json /etc/xray/config-noads.json
 COPY common/index.html /usr/local/openresty/nginx/html/index.html
 COPY proxies/openresty/nginx.conf /usr/local/openresty/nginx/conf/nginx.conf
+COPY common/ssh-install.sh /tmp/ssh-install.sh
+COPY common/ssh-ws.sh /usr/local/bin/ssh-ws.sh
+RUN sh /tmp/ssh-install.sh && rm -f /tmp/ssh-install.sh && chmod +x /usr/local/bin/ssh-ws.sh
 COPY proxies/openresty/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
