@@ -79,23 +79,6 @@ Build context is the repo root (so `common/` and the chosen
 `proxies/<engine>/` are both reachable) - just swap the `-f` path and
 image tag for a different engine.
 
-## Cloud Run and mixed HTTP/1.1 + HTTP/2 traffic
-
-By default Cloud Run forwards plain HTTP/1.1 to your container and only
-sends real end-to-end HTTP/2 (h2c) for native gRPC calls; deploying with
-`--use-http2` instead forces *everything* to arrive as h2c, with no more
-automatic downgrading. That matters here because WS/HU/XHTTP need
-HTTP/1.1 and gRPC/H2 need real HTTP/2, both on the same Cloud Run port.
-
-Envoy, Caddy, Traefik, and H2O all genuinely auto-detect HTTP/1.1 vs.
-cleartext HTTP/2 per connection on one plaintext listener, so they serve
-both families fine as-is. **HAProxy does not** - its cleartext `proto h2c`
-is prior-knowledge-only (no fallback to HTTP/1.1), so this repo's
-`haproxy.cfg` binds plain HTTP/1.1, which means gRPC/H2 through HAProxy
-only work if you redeploy that service with `--use-http2` - and doing so
-will in turn break WS/HU/XHTTP for clients that don't speak HTTP/2. If you
-need both protocol families from one service, pick Envoy or Caddy.
-
 ## Anti-abuse / rate limiting
 
 Basic per-IP connection and request-rate limiting is wired into the two

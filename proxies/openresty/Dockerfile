@@ -8,12 +8,7 @@ RUN curl -fsSL -o /tmp/xray.zip \
     && unzip -q /tmp/xray.zip -d /out \
     && chmod +x /out/xray
 
-FROM openresty/openresty:alpine
-# Rolling `alpine` tag instead of a pinned patch version
-# (`1.25.3.1-alpine` etc.) for the same reason as HAProxy above - pinned
-# patch tags are the most likely cause of a sudden build failure here.
-# Pin an exact version once confirmed current:
-# https://hub.docker.com/r/openresty/openresty/tags
+FROM openresty/openresty:1.25.3.1-alpine
 RUN apk add --no-cache bash ca-certificates
 COPY --from=xray-fetch /out/xray /usr/local/bin/xray
 RUN mkdir -p /etc/xray

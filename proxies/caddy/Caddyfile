@@ -101,36 +101,6 @@
         reverse_proxy 127.0.0.1:10009
     }
 
-    # --- H2 (Xray "http" transport) ---
-    handle /saeka-tojirp-h2* {
-        reverse_proxy 127.0.0.1:10016 {
-            transport http {
-                versions h2c 2
-            }
-        }
-    }
-    handle /vmess-saeka-h2* {
-        reverse_proxy 127.0.0.1:10017 {
-            transport http {
-                versions h2c 2
-            }
-        }
-    }
-    handle /vless-saeka-h2* {
-        reverse_proxy 127.0.0.1:10018 {
-            transport http {
-                versions h2c 2
-            }
-        }
-    }
-    handle /ss-saeka-h2* {
-        reverse_proxy 127.0.0.1:10019 {
-            transport http {
-                versions h2c 2
-            }
-        }
-    }
-
     handle {
         root * /var/www/html
         file_server

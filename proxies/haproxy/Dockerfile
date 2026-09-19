@@ -9,12 +9,7 @@ RUN curl -fsSL -o /tmp/xray.zip \
     && unzip -q /tmp/xray.zip -d /out \
     && chmod +x /out/xray
 
-FROM haproxy:alpine
-# Using the rolling `alpine` tag instead of a pinned patch version
-# (`2.9-alpine` etc.) - those get pruned off Docker Hub over time and are
-# the single most likely reason this engine specifically stopped
-# building. Pin an exact version again once you've confirmed what's
-# current: https://hub.docker.com/_/haproxy/tags
+FROM haproxy:2.9-alpine
 USER root
 RUN apk add --no-cache bash ca-certificates
 COPY --from=xray-fetch /out/xray /usr/local/bin/xray

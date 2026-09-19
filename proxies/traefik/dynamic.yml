@@ -72,24 +72,6 @@ http:
       service: ss-ws-svc
       priority: 50
 
-    # --- H2 (Xray "http" transport) ---
-    trojan-h2:
-      rule: "PathPrefix(`/saeka-tojirp-h2`)"
-      service: trojan-h2-svc
-      priority: 100
-    vmess-h2:
-      rule: "PathPrefix(`/vmess-saeka-h2`)"
-      service: vmess-h2-svc
-      priority: 100
-    vless-h2:
-      rule: "PathPrefix(`/vless-saeka-h2`)"
-      service: vless-h2-svc
-      priority: 100
-    ss-h2:
-      rule: "PathPrefix(`/ss-saeka-h2`)"
-      service: ss-h2-svc
-      priority: 100
-
   services:
     # gRPC backends use the h2c:// scheme so Traefik speaks cleartext
     # HTTP/2 to Xray's gRPC inbound instead of HTTP/1.1.
@@ -144,16 +126,3 @@ http:
     ss-ws-svc:
       loadBalancer:
         servers: [{url: "http://127.0.0.1:10009"}]
-
-    trojan-h2-svc:
-      loadBalancer:
-        servers: [{url: "h2c://127.0.0.1:10016"}]
-    vmess-h2-svc:
-      loadBalancer:
-        servers: [{url: "h2c://127.0.0.1:10017"}]
-    vless-h2-svc:
-      loadBalancer:
-        servers: [{url: "h2c://127.0.0.1:10018"}]
-    ss-h2-svc:
-      loadBalancer:
-        servers: [{url: "h2c://127.0.0.1:10019"}]
