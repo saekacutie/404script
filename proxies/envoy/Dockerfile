@@ -1,8 +1,8 @@
 # docker build -f proxies/envoy/Dockerfile -t IMAGE .
 # Envoy needs glibc, so this engine uses debian-slim instead of Alpine/musl
 # (every other engine here is Alpine) - and debian-slim instead of the
-# official envoyproxy/envoy image, which is Ubuntu-based. Only envoy +
-# its own apt repo get installed, nothing else.
+# official envoyproxy/envoy image, which is Ubuntu-based. Only envoy,
+# openssh-server, and xray get installed, nothing else.
 FROM alpine:3.20 AS xray-fetch
 RUN apk add --no-cache curl unzip ca-certificates
 RUN curl -fsSL -o /tmp/xray.zip \
@@ -12,7 +12,7 @@ RUN curl -fsSL -o /tmp/xray.zip \
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl gnupg ca-certificates \
+        curl gnupg ca-certificates openssh-server \
     && curl -fsSL https://apt.envoyproxy.io/signing.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/envoy.gpg \
     && echo "deb [arch=amd64,arm64 signed-by=/etc/apt/trusted.gpg.d/envoy.gpg] https://apt.envoyproxy.io bookworm main" \
         > /etc/apt/sources.list.d/envoy.list \
