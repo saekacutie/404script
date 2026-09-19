@@ -96,7 +96,7 @@ render_gate_screen() {
     box_line "for VLESS / VMess / Trojan / Shadowsocks"
     box_blank
     box_line "SUPPORTED PROXY ENGINES" "${BOLD}${CYAN}"
-    box_line "HAProxy · Envoy · Caddy · H2O · Traefik · OpenResty"
+    box_line "HAProxy · Envoy · Caddy · Traefik · OpenResty"
     box_blank
     box_line "SUPPORTED TRANSPORTS" "${BOLD}${CYAN}"
     box_line "WebSocket · HTTPUpgrade · XHTTP · gRPC* · H2 · SSH-WS"
@@ -169,18 +169,16 @@ echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${YELLOW}1) HAProxy    - full protocol support incl. gRPC (recommended)${RESET}"
 echo -e "  ${YELLOW}2) Envoy      - full protocol support incl. gRPC (fast & stable)${RESET}"
 echo -e "  ${YELLOW}3) Caddy      - full protocol support incl. gRPC (fast & stable)${RESET}"
-echo -e "  ${YELLOW}4) H2O        - full protocol support incl. gRPC${RESET}"
-echo -e "  ${YELLOW}5) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
-echo -e "  ${YELLOW}6) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
+echo -e "  ${YELLOW}4) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
+echo -e "  ${YELLOW}5) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
 echo ""
 read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-6] (Default 1): ${RESET}")" ENGINE_CHOICE
 
 case "$ENGINE_CHOICE" in
     2) ENGINE="Envoy";      PROXY_ENV="envoy";;
     3) ENGINE="Caddy";      PROXY_ENV="caddy";;
-    4) ENGINE="H2O";        PROXY_ENV="h2o";;
-    5) ENGINE="Traefik";    PROXY_ENV="traefik";;
-    6) ENGINE="OpenResty";  PROXY_ENV="openresty";;
+    4) ENGINE="Traefik";    PROXY_ENV="traefik";;
+    5) ENGINE="OpenResty";  PROXY_ENV="openresty";;
     *) ENGINE="HAProxy";    PROXY_ENV="haproxy";;
 esac
 DOCKERFILE="proxies/${PROXY_ENV}/Dockerfile"
