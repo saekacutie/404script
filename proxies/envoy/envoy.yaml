@@ -65,6 +65,16 @@ static_resources:
               - match: { prefix: "/ss-saeka" }
                 route: { cluster: xray_10009, timeout: 0s, idle_timeout: 0s }
 
+              # H2 (Xray "http" transport)
+              - match: { prefix: "/saeka-tojirp-h2" }
+                route: { cluster: xray_10016, timeout: 0s, idle_timeout: 0s }
+              - match: { prefix: "/vmess-saeka-h2" }
+                route: { cluster: xray_10017, timeout: 0s, idle_timeout: 0s }
+              - match: { prefix: "/vless-saeka-h2" }
+                route: { cluster: xray_10018, timeout: 0s, idle_timeout: 0s }
+              - match: { prefix: "/ss-saeka-h2" }
+                route: { cluster: xray_10019, timeout: 0s, idle_timeout: 0s }
+
           http_filters:
           - name: envoy.filters.http.router
             typed_config:
@@ -242,3 +252,57 @@ static_resources:
       endpoints:
       - lb_endpoints:
         - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10015 } } }
+
+  # H2 (Xray "http" transport) clusters - real HTTP/2 duplex, same as gRPC
+  - name: xray_10016
+    type: STATIC
+    connect_timeout: 1s
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    load_assignment:
+      cluster_name: xray_10016
+      endpoints:
+      - lb_endpoints:
+        - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10016 } } }
+  - name: xray_10017
+    type: STATIC
+    connect_timeout: 1s
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    load_assignment:
+      cluster_name: xray_10017
+      endpoints:
+      - lb_endpoints:
+        - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10017 } } }
+  - name: xray_10018
+    type: STATIC
+    connect_timeout: 1s
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    load_assignment:
+      cluster_name: xray_10018
+      endpoints:
+      - lb_endpoints:
+        - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10018 } } }
+  - name: xray_10019
+    type: STATIC
+    connect_timeout: 1s
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    load_assignment:
+      cluster_name: xray_10019
+      endpoints:
+      - lb_endpoints:
+        - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10019 } } }
