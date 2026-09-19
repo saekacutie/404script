@@ -15,8 +15,8 @@ echo "[+] Starting Xray Core..."
 xray run -config /etc/xray/config.json &
 XRAY_PID=$!
 
-echo "[+] Starting caddy..."
-caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
+echo "[+] Starting openresty..."
+/usr/local/openresty/bin/openresty -g 'daemon off;' &
 ENGINE_PID=$!
 
 ssh_ws_start || echo "[!] SSH-WS failed to start (continuing without it)"
@@ -31,8 +31,8 @@ while true; do
         XRAY_PID=$!
     fi
     if ! kill -0 "$ENGINE_PID" 2>/dev/null; then
-        echo "[watchdog] caddy died, restarting..."
-        caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
+        echo "[watchdog] openresty died, restarting..."
+        /usr/local/openresty/bin/openresty -g 'daemon off;' &
         ENGINE_PID=$!
     fi
     ssh_ws_watch || true

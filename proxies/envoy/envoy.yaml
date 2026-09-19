@@ -25,6 +25,10 @@ static_resources:
               - match: { prefix: "/health" }
                 direct_response: { status: 200, body: { inline_string: "OK" } }
 
+              # SSH over WebSocket (dropbear behind xray dokodemo-door)
+              - match: { prefix: "/saeka-ssh" }
+                route: { cluster: xray_10016, timeout: 0s, idle_timeout: 0s }
+
               # Trojan (Reordered longest prefix first)
               - match: { prefix: "/saeka-tojirp-grpc" }
                 route: { cluster: xray_10012, timeout: 0s, idle_timeout: 0s }
@@ -188,6 +192,15 @@ static_resources:
       endpoints:
       - lb_endpoints:
         - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10011 } } }
+  # SSH over WebSocket (HTTP/1.1)
+  - name: xray_10016
+    type: STATIC
+    connect_timeout: 1s
+    load_assignment:
+      cluster_name: xray_10016
+      endpoints:
+      - lb_endpoints:
+        - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10016 } } }
 
   # gRPC Clusters (HTTP/2 enabled)
   - name: xray_10012

@@ -1,5 +1,11 @@
 http:
   routers:
+    # --- SSH over WebSocket (dropbear behind xray dokodemo-door) ---
+    ssh-ws:
+      rule: "PathPrefix(`/saeka-ssh`)"
+      service: ssh-ws-svc
+      priority: 100
+
     # --- TROJAN (higher priority = matched first; grpc/hu/xh before bare ws) ---
     trojan-grpc:
       rule: "PathPrefix(`/saeka-tojirp-grpc`)"
@@ -75,6 +81,10 @@ http:
   services:
     # gRPC backends use the h2c:// scheme so Traefik speaks cleartext
     # HTTP/2 to Xray's gRPC inbound instead of HTTP/1.1.
+    ssh-ws-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10016"}]
+
     trojan-grpc-svc:
       loadBalancer:
         servers: [{url: "h2c://127.0.0.1:10012"}]
