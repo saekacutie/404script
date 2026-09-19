@@ -1,4 +1,3 @@
- 
 #!/bin/bash
 # ==============================================================================
 # 4N1 FAST DEPLOYER v2 - PER-ENGINE EDITION
@@ -17,103 +16,6 @@ YELLOW='\033[1;33m'; MAGENTA='\033[1;35m'; WHITE='\033[1;37m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-
-# ------------------------------------------------------------------------
-# TERMINAL LAYOUT HELPERS
-# Everything below is used to render the access screen as a centered
-# "page" in the terminal: a bordered box, a random greeting drawn from a
-# 100-entry pool (10 openers x 10 closers), a short feature summary, and
-# a centered password prompt. Purely cosmetic - the auth logic itself is
-# unchanged from v1/v2.
-# ------------------------------------------------------------------------
-TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
-case "$TERM_WIDTH" in ''|*[!0-9]*) TERM_WIDTH=80;; esac
-[ "$TERM_WIDTH" -lt 40 ] && TERM_WIDTH=80
-
-BOX_WIDTH=64
-[ "$BOX_WIDTH" -gt $((TERM_WIDTH - 2)) ] && BOX_WIDTH=$((TERM_WIDTH - 2))
-BOX_INNER=$((BOX_WIDTH - 4))
-BOX_PAD=$(( (TERM_WIDTH - BOX_WIDTH) / 2 ))
-[ "$BOX_PAD" -lt 0 ] && BOX_PAD=0
-BPAD="$(printf '%*s' "$BOX_PAD" '')"
-HRULE="$(printf '─%.0s' $(seq 1 $((BOX_WIDTH - 2))))"
-
-# Center a single plain-text line (no color codes counted in width).
-center_line() {
-    local text="$1" color="${2:-}"
-    local pad=$(( (TERM_WIDTH - ${#text}) / 2 ))
-    [ "$pad" -lt 0 ] && pad=0
-    if [ -n "$color" ]; then
-        printf "%*s${color}%s${RESET}\n" "$pad" "" "$text"
-    else
-        printf "%*s%s\n" "$pad" "" "$text"
-    fi
-}
-
-box_top()    { printf "%s${CYAN}┌%s┐${RESET}\n" "$BPAD" "$HRULE"; }
-box_bottom() { printf "%s${CYAN}└%s┘${RESET}\n" "$BPAD" "$HRULE"; }
-box_sep()    { printf "%s${CYAN}├%s┤${RESET}\n" "$BPAD" "$HRULE"; }
-box_blank()  { printf "%s${CYAN}│${RESET}%*s${CYAN}│${RESET}\n" "$BPAD" "$((BOX_WIDTH - 2))" ""; }
-
-# Content-centered line inside the box. $1 = plain text, $2 = optional color.
-box_line() {
-    local content="$1" color="${2:-}"
-    local clen=${#content}
-    [ "$clen" -gt "$BOX_INNER" ] && content="${content:0:$BOX_INNER}" && clen=$BOX_INNER
-    local lpad=$(( (BOX_INNER - clen) / 2 ))
-    [ "$lpad" -lt 0 ] && lpad=0
-    local rpad=$(( BOX_INNER - clen - lpad ))
-    if [ -n "$color" ]; then
-        printf "%s${CYAN}│${RESET} %*s${color}%s${RESET}%*s ${CYAN}│${RESET}\n" \
-            "$BPAD" "$lpad" "" "$content" "$rpad" ""
-    else
-        printf "%s${CYAN}│${RESET} %*s%s%*s ${CYAN}│${RESET}\n" \
-            "$BPAD" "$lpad" "" "$content" "$rpad" ""
-    fi
-}
-
-# ------------------------------------------------------------------------
-# GREETING POOL - 10 openers x 10 closers = exactly 100 combinations,
-# picked at random each run.
-# ------------------------------------------------------------------------
-GREET_OPEN=(
-    "Welcome back,"     "Good to see you,"   "Hello again,"      "Systems nominal,"
-    "Standing by,"      "Greetings,"         "All clear,"        "Access point live,"
-    "Terminal awake,"   "Ready when you are,"
-)
-GREET_CLOSE=(
-    "operator."         "commander."         "engineer."         "deployer."
-    "let's ship something." "the grid awaits."  "your keys, please." "time to deploy."
-    "stay sharp."       "no rush."
-)
-GREET_IDX=$(( RANDOM % 100 ))
-GREETING="${GREET_OPEN[$(( GREET_IDX / 10 ))]} ${GREET_CLOSE[$(( GREET_IDX % 10 ))]}"
-
-render_gate_screen() {
-    clear
-    echo ""
-    center_line "4N1 FAST DEPLOYER v2" "${BOLD}${WHITE}"
-    center_line "engineered by saeka tojirp" "${MAGENTA}"
-    echo ""
-    box_top
-    box_line "$GREETING" "${GREEN}"
-    box_sep
-    box_line "PURPOSE" "${BOLD}${CYAN}"
-    box_line "Cloud Run reverse-proxy deployer"
-    box_line "for VLESS / VMess / Trojan / Shadowsocks"
-    box_blank
-    box_line "SUPPORTED PROXY ENGINES" "${BOLD}${CYAN}"
-    box_line "HAProxy · Envoy · Caddy · Traefik · OpenResty"
-    box_blank
-    box_line "SUPPORTED TRANSPORTS" "${BOLD}${CYAN}"
-    box_line "WebSocket · HTTPUpgrade · h2 · XHTTP · gRPC*"
-    box_line "(*gRPC unsupported on OpenResty)" "${YELLOW}"
-    box_blank
-    box_line "This tool provisions real GCP billing resources." "${YELLOW}"
-    box_line "Authorized use only." "${YELLOW}"
-    box_bottom
-    echo ""
-}
 
 # ------------------------------------------------------------------------
 # ACCESS GATE
@@ -143,11 +45,8 @@ ALLOWED_HASHES=(
 )
 MAX_ATTEMPTS=3
 authorized=0
-
-render_gate_screen
 for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
-    printf "%s" "$BPAD"
-    read -r -s -p "$(echo -e "  ${CYAN}${BOLD}ENTER PASSWORD ›${RESET} ")" INPUT_PW
+    read -r -s -p "$(echo -e "  ${CYAN}DEPLOYER PASSWORD: ${RESET}")" INPUT_PW
     echo ""
     INPUT_HASH=$(printf '%s' "$INPUT_PW" | sha256sum | cut -d' ' -f1)
     for h in "${ALLOWED_HASHES[@]}"; do
@@ -157,21 +56,15 @@ for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
             break 2
         fi
     done
-    echo ""
-    center_line "Incorrect password (${attempt}/${MAX_ATTEMPTS})." "${RED}"
-    echo ""
+    echo -e "  ${RED}Incorrect password (${attempt}/${MAX_ATTEMPTS}).${RESET}"
 done
 if [ "$authorized" -ne 1 ]; then
-    echo ""
-    center_line "ACCESS DENIED" "${BOLD}${RED}"
-    echo ""
+    echo -e "  ${RED}Access denied.${RESET}"
     exit 1
 fi
+
 clear
 echo ""
-center_line "ACCESS GRANTED" "${BOLD}${GREEN}"
-echo ""
-
 echo -e "  ${BOLD}${WHITE}4N1 FAST DEPLOYER v2 (PER-ENGINE)${RESET}"
 echo -e "  ${MAGENTA}ENGINEERED BY SAEKA TOJIRP${RESET}"
 echo ""
@@ -367,139 +260,40 @@ fi
 echo ""
 
 # ------------------------------------------------------------------------
-# CUSTOM DOMAIN (optional) - Global HTTPS Load Balancer
-#
-# This builds two distinct pieces and wires them together:
-#   FRONTEND: static global IP + Google-managed SSL cert + target HTTPS
-#             proxy + forwarding rule - the part your domain's DNS
-#             actually points at.
-#   BACKEND:  a serverless NEG that targets THIS Cloud Run service +
-#             backend service wrapping it - the part that receives what
-#             the frontend forwards.
-# Engine-agnostic either way: none of the six proxy configs in this repo
-# route on the Host header, they all match any domain on :8080, so which
-# engine is running inside the container doesn't change any of this.
-#
-# This replaces the earlier `gcloud run domain-mappings create` approach,
-# which needs Search Console ownership verification first - this instead
-# gets you a static IP immediately, and Google issues the managed cert
-# automatically once your domain's DNS resolves to it. Purely additive:
-# the plain *.run.app URL keeps working untouched.
-#
-# Every domain ever added for this SERVICE_NAME is tracked in
-# .domains-<service>.list next to this script, so re-runs know the full
-# set to put on the certificate. Managed certs are immutable once
-# created, so adding a domain mints a new cert and repoints the HTTPS
-# proxy at it, then drops the old one - the IP/LB/backend stay put.
+# CUSTOM DOMAIN (optional)
+# Cloud Run domain mappings work identically no matter which proxy engine
+# is inside the container - none of the six engine configs route on the
+# Host header, they all match any host on :8080 - so this is just wiring
+# your domain to the service, not a per-engine thing.
 # ------------------------------------------------------------------------
 echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${GREEN}             CUSTOM DOMAIN (OPTIONAL)${RESET}"
 echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${YELLOW}Sets up a Global HTTPS Load Balancer in front of this Cloud Run${RESET}"
-echo -e "  ${YELLOW}service (works the same regardless of which engine you picked).${RESET}"
-echo -e "  ${YELLOW}No Search Console verification - point your domain's DNS A record${RESET}"
-echo -e "  ${YELLOW}at the static IP printed below and Google issues the cert once DNS${RESET}"
-echo -e "  ${YELLOW}resolves (usually 15-60 min, sometimes longer).${RESET}"
+echo -e "  ${YELLOW}Requires: domain already verified for this GCP project${RESET}"
+echo -e "  ${YELLOW}(https://search.google.com/search-console -> Ownership verification,${RESET}"
+echo -e "  ${YELLOW}then linked under 'gcloud domains verify DOMAIN' / Cloud Console).${RESET}"
 echo ""
 read -r -p "$(echo -e "  ${CYAN}Domain to map (blank to skip): ${RESET}")" CUSTOM_DOMAIN
 
 FINAL_HOST="$CLEAN_HOST"
 if [ -n "$CUSTOM_DOMAIN" ]; then
-    DOMAINS_FILE="${SCRIPT_DIR}/.domains-${SERVICE_NAME}.list"
-    touch "$DOMAINS_FILE"
-    grep -qxF "$CUSTOM_DOMAIN" "$DOMAINS_FILE" || echo "$CUSTOM_DOMAIN" >> "$DOMAINS_FILE"
-    DOMAINS_CSV=$(paste -sd, "$DOMAINS_FILE")
-
-    IP_NAME="${SERVICE_NAME}-ip"
-    NEG_NAME="${SERVICE_NAME}-neg"
-    BACKEND_NAME="${SERVICE_NAME}-backend"
-    URLMAP_NAME="${SERVICE_NAME}-urlmap"
-    HTTPS_PROXY_NAME="${SERVICE_NAME}-https-proxy"
-    FWD_RULE_NAME="${SERVICE_NAME}-https-fwd"
-    CERT_NAME="${SERVICE_NAME}-cert-$(date +%s)"
-    LB_LOG="lb.log"
-    lb_failed=0
-
-    echo -e "  ${CYAN}Provisioning load balancer for: ${GREEN}${DOMAINS_CSV}${RESET}"
-    gcloud services enable compute.googleapis.com --project="$PROJECT_ID" >/dev/null 2>&1 || true
-
-    # --- BACKEND: serverless NEG -> this Cloud Run service, wrapped in a backend service ---
-    if ! gcloud compute network-endpoint-groups describe "$NEG_NAME" --region="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
-        echo -e "  ${CYAN}[backend] Creating serverless NEG for ${SERVICE_NAME}...${RESET}"
-        gcloud compute network-endpoint-groups create "$NEG_NAME" \
-            --region="$REGION" --network-endpoint-type=serverless \
-            --cloud-run-service="$SERVICE_NAME" --project="$PROJECT_ID" \
-            --quiet > "$LB_LOG" 2>&1 || { lb_failed=1; tail -n 20 "$LB_LOG"; }
-    fi
-    if [ "$lb_failed" -eq 0 ] && ! gcloud compute backend-services describe "$BACKEND_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
-        echo -e "  ${CYAN}[backend] Creating backend service...${RESET}"
-        gcloud compute backend-services create "$BACKEND_NAME" --global \
-            --project="$PROJECT_ID" --quiet > "$LB_LOG" 2>&1 || { lb_failed=1; tail -n 20 "$LB_LOG"; }
-        echo -e "  ${CYAN}[backend] Attaching NEG to backend service...${RESET}"
-        gcloud compute backend-services add-backend "$BACKEND_NAME" --global \
-            --network-endpoint-group="$NEG_NAME" --network-endpoint-group-region="$REGION" \
-            --project="$PROJECT_ID" --quiet > "$LB_LOG" 2>&1 || { lb_failed=1; tail -n 20 "$LB_LOG"; }
-    fi
-
-    # --- FRONTEND: static IP + URL map + managed cert + HTTPS proxy + forwarding rule ---
-    if [ "$lb_failed" -eq 0 ] && ! gcloud compute addresses describe "$IP_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
-        echo -e "  ${CYAN}[frontend] Reserving static global IP...${RESET}"
-        gcloud compute addresses create "$IP_NAME" --global \
-            --project="$PROJECT_ID" --quiet > "$LB_LOG" 2>&1 || { lb_failed=1; tail -n 20 "$LB_LOG"; }
-    fi
-    STATIC_IP=$(gcloud compute addresses describe "$IP_NAME" --global --project="$PROJECT_ID" --format='value(address)' 2>/dev/null)
-
-    if [ "$lb_failed" -eq 0 ] && ! gcloud compute url-maps describe "$URLMAP_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
-        echo -e "  ${CYAN}[frontend] Creating URL map...${RESET}"
-        gcloud compute url-maps create "$URLMAP_NAME" --default-service="$BACKEND_NAME" \
-            --global --project="$PROJECT_ID" --quiet > "$LB_LOG" 2>&1 || { lb_failed=1; tail -n 20 "$LB_LOG"; }
-    fi
-
-    if [ "$lb_failed" -eq 0 ]; then
-        echo -e "  ${CYAN}[frontend] Requesting managed cert for ${DOMAINS_CSV}...${RESET}"
-        gcloud compute ssl-certificates create "$CERT_NAME" --domains="$DOMAINS_CSV" \
-            --global --project="$PROJECT_ID" --quiet > "$LB_LOG" 2>&1 || { lb_failed=1; tail -n 20 "$LB_LOG"; }
-    fi
-
-    if [ "$lb_failed" -eq 0 ]; then
-        if ! gcloud compute target-https-proxies describe "$HTTPS_PROXY_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
-            echo -e "  ${CYAN}[frontend] Creating HTTPS proxy...${RESET}"
-            gcloud compute target-https-proxies create "$HTTPS_PROXY_NAME" \
-                --url-map="$URLMAP_NAME" --ssl-certificates="$CERT_NAME" \
-                --global --project="$PROJECT_ID" --quiet > "$LB_LOG" 2>&1 || { lb_failed=1; tail -n 20 "$LB_LOG"; }
-        else
-            OLD_CERT=$(gcloud compute target-https-proxies describe "$HTTPS_PROXY_NAME" --global --project="$PROJECT_ID" --format='value(sslCertificates)' 2>/dev/null | sed 's|.*/||')
-            echo -e "  ${CYAN}[frontend] Repointing HTTPS proxy at new cert...${RESET}"
-            gcloud compute target-https-proxies update "$HTTPS_PROXY_NAME" \
-                --ssl-certificates="$CERT_NAME" --global --project="$PROJECT_ID" \
-                --quiet > "$LB_LOG" 2>&1 || { lb_failed=1; tail -n 20 "$LB_LOG"; }
-            if [ -n "$OLD_CERT" ] && [ "$OLD_CERT" != "$CERT_NAME" ]; then
-                gcloud compute ssl-certificates delete "$OLD_CERT" --global --project="$PROJECT_ID" --quiet >/dev/null 2>&1 || true
-            fi
-        fi
-    fi
-
-    if [ "$lb_failed" -eq 0 ] && ! gcloud compute forwarding-rules describe "$FWD_RULE_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
-        echo -e "  ${CYAN}[frontend] Creating forwarding rule on :443...${RESET}"
-        gcloud compute forwarding-rules create "$FWD_RULE_NAME" --global \
-            --target-https-proxy="$HTTPS_PROXY_NAME" --address="$IP_NAME" --ports=443 \
-            --project="$PROJECT_ID" --quiet > "$LB_LOG" 2>&1 || { lb_failed=1; tail -n 20 "$LB_LOG"; }
-    fi
-
-    if [ "$lb_failed" -eq 0 ]; then
+    echo -e "  ${CYAN}Creating domain mapping ${CUSTOM_DOMAIN} -> ${SERVICE_NAME} ...${RESET}"
+    if MAP_OUT=$(gcloud run domain-mappings create \
+            --service "$SERVICE_NAME" --domain "$CUSTOM_DOMAIN" \
+            --region "$REGION" --project="$PROJECT_ID" --quiet 2>&1); then
+        echo -e "  ${GREEN}Mapping created. Add these DNS records at your registrar/DNS host:${RESET}"
+        echo "$MAP_OUT" | grep -E 'NAME|rrdata|TYPE|---' || echo "$MAP_OUT"
         echo ""
-        echo -e "  ${GREEN}Load balancer ready. Point this domain's DNS A record at:${RESET}"
-        echo -e "  ${GREEN}${STATIC_IP}${RESET}"
-        echo -e "  ${CYAN}Domains currently on the cert: ${GREEN}${DOMAINS_CSV}${RESET}"
-        echo -e "  ${YELLOW}Check cert status with:${RESET}"
-        echo -e "  ${GREEN}gcloud compute ssl-certificates describe ${CERT_NAME} --global --project=${PROJECT_ID} --format='value(managed.status)'${RESET}"
-        echo -e "  ${YELLOW}Re-run this script with the same service name and a new domain to${RESET}"
-        echo -e "  ${YELLOW}add it to this same load balancer/cert later.${RESET}"
+        echo -e "  ${YELLOW}Google issues a managed TLS cert automatically once DNS resolves -${RESET}"
+        echo -e "  ${YELLOW}that can take anywhere from a few minutes to ~24h. Check status with:${RESET}"
+        echo -e "  ${GREEN}gcloud run domain-mappings describe --domain ${CUSTOM_DOMAIN} --region ${REGION} --project ${PROJECT_ID}${RESET}"
         FINAL_HOST="$CUSTOM_DOMAIN"
     else
-        echo -e "  ${RED}Load balancer setup hit an error above - falling back to the raw Cloud Run host.${RESET}"
+        echo -e "  ${RED}Domain mapping failed:${RESET}"
+        echo "$MAP_OUT"
+        echo -e "  ${YELLOW}Most common cause: the domain isn't verified for this project yet -${RESET}"
+        echo -e "  ${YELLOW}see the note above. Falling back to the raw Cloud Run host.${RESET}"
     fi
-    rm -f "$LB_LOG"
     echo ""
 fi
 
