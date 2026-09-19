@@ -1,103 +1,38 @@
-# ch-saeka (v2 - per-engine)
 
-## What changed from v1
+## Raw TCP companion VM
 
-**v1** had one `Dockerfile` that installed *all six* proxy engines
-(HAProxy, Envoy, Caddy, Traefik, H2O-built-from-source, OpenResty) into a
-single Ubuntu image, then picked one at *container start* via
-`PROXY_ENGINE`. That meant every build paid for H2O's from-source
-`cmake`/`ninja` compile and every other engine's install, even though a
-given deployment only ever runs one of them.
+Cloud Run cannot expose the raw TCP/UDP handshake required by VLESS+REALITY,
+OpenVPN, or SSH. The supported deployment is therefore hybrid:
 
-**v2** gives each engine its own folder under `proxies/<engine>/` with
-its own `Dockerfile`, own config, own `entrypoint.sh`. Picking HAProxy in
-`deploy.sh` now builds *only* `proxies/haproxy/Dockerfile` - a small
-Alpine image with HAProxy + Xray and nothing else. None of the other
-five engines are downloaded, compiled, or added to the image.
+- `deploy.sh` continues to deploy the HTTP-compatible transports to Cloud Run:
+  WebSocket, HTTPUpgrade, XHTTP and gRPC.
+- `deploy_vm.py` provisions a separate Debian 12 Compute Engine VM with a
+  regional static IP for REALITY, OpenVPN and a restricted SSH SOCKS tunnel.
+- If a domain and a least-privilege Cloudflare DNS token are supplied, the
+  script creates a sibling A record such as `vpn.example.com` pointing at the
+  VM. It never attempts to modify or repoint `*.run.app`.
 
-```
-common/                  shared by every engine
-  config-ads.json         Xray inbound config, ads allowed
-  config-noads.json        "        "        , ad/tracker domains blackholed
-  index.html               plain 404 landing page (served where an engine has a static fallback)
-proxies/
-  haproxy/  Dockerfile  haproxy.cfg   entrypoint.sh
-  envoy/    Dockerfile  envoy.yaml    entrypoint.sh
-  caddy/    Dockerfile  Caddyfile     entrypoint.sh
-  h2o/      Dockerfile  h2o.conf      entrypoint.sh
-  traefik/  Dockerfile  traefik.yml  dynamic.yml  entrypoint.sh
-  openresty/Dockerfile  nginx.conf    entrypoint.sh
-deploy.sh                 interactive deployer (password-gated, streams real build/deploy logs)
-regions.sh                 region picker, sourced by deploy.sh
-generate-client-links.sh  builds vless/trojan share links + outbound JSON for a deployed host
-gh_verify.py               generic multi-format syntax linter for this repo (yaml/json/py/sh/docker/haproxy/nginx/envoy)
+Run it after the Cloud Run deployment:
+
+```bash
+chmod +x deploy_vm.py
+python3 deploy_vm.py
 ```
 
-## Base images (no Ubuntu, per your request)
+The script stores generated artifacts under `~/.deploy_vm/`:
 
-| Engine     | Base                              |
-|------------|------------------------------------|
-| HAProxy    | `haproxy:2.9-alpine`               |
-| Caddy      | `caddy:2-alpine`                   |
-| Traefik    | `traefik:v3.1` (alpine-based)      |
-| OpenResty  | `openresty/openresty:1.25.3.1-alpine` |
-| H2O        | `alpine:3.20` + `apk add h2o`      |
-| Envoy      | `debian:bookworm-slim` + apt.envoyproxy.io (Envoy's binary needs glibc, so it can't run on musl/Alpine - this is the one engine that isn't Alpine, but it's Debian-slim, not Ubuntu) |
+- `*-startup.sh` — the exact VM startup script for audit/recovery
+- `*-client1.ovpn` — the OpenVPN client profile (mode 0600)
+- `*_tunnel_key` — the SSH forwarding-only key (mode 0600)
 
-Xray-core is fetched once per engine from its GitHub release zip (small,
-statically-linked Go binary - works on both the Alpine and Debian bases
-above).
+### Endpoint selection
 
-## Deploying
+Use the Cloud Run host for the existing HTTP transports. Use the VM hostname or
+static IP for REALITY, OpenVPN and SSH. A VM IP cannot be pointed *to* a
+`run.app` hostname: DNS records point names to addresses, while Cloud Run does
+not provide a raw TCP forwarding layer. The deployer prints separate endpoints
+and client material so a frontend can present these as distinct proxy choices.
 
-```
-./deploy.sh
-```
-
-You'll be asked for the deployer password first (see below), then
-engine, ads mode, region, service name, and sizing tier - same flow as
-v1. Build and deploy output now streams to your terminal as it happens
-(`tee`'d to `build.log`/`deploy.log`, which are only kept around if a
-step fails, for troubleshooting).
-
-### Deployer password
-
-`deploy.sh` checks the password you type against three SHA-256 hashes
-baked into the script - it never stores the plaintext password.
-**This is a "stop accidental runs" gate, not real security** - a hash
-sitting in a script anyone can read is brute-forceable offline, and
-that's true no matter how it's obfuscated. If you need actual access
-control, put it at the IAM/repo level, not in bash.
-
-### Building one engine directly (without the interactive script)
-
-```
-docker build -f proxies/haproxy/Dockerfile -t my-haproxy-image .
-```
-
-Build context is the repo root (so `common/` and the chosen
-`proxies/<engine>/` are both reachable) - just swap the `-f` path and
-image tag for a different engine.
-
-## Anti-abuse / rate limiting
-
-Basic per-IP connection and request-rate limiting is wired into the two
-engines whose config format supports it simply: HAProxy (stick-table,
-`too_many_conns` / `conn_rate_abuse` / `req_rate_abuse` ACLs, 429 on
-trip) and OpenResty (`limit_conn_zone` / `limit_req_zone`). This blunts
-casual abusive traffic from a single source; it isn't a substitute for
-network-level DDoS protection (e.g. Cloud Armor in front of Cloud Run).
-Ask if you want the same style of limiting added to Envoy/Caddy/Traefik/H2O.
-
-## One thing I changed without being asked
-
-The original `index.html` was styled as a fake "Qwiklabs lab
-expiration" countdown with a hidden "ACCESS PANEL" button, clearly meant
-to disguise this service's Cloud Run URL as an expired training-lab
-notice. Deploying persistent services on Qwiklabs/Cloud Skills Boost
-lab credentials, dressed up to not look like what it is, is the kind of
-thing that gets accounts banned and is outside what I'll help build out
-further - so I swapped it for a plain 404 page instead. Everything else
-in this rewrite (per-engine Dockerfiles, config fixes, rate limiting,
-streaming deploy output, password gate) is unrelated to that and stands
-on its own regardless of where you actually run it.
+The VM firewall opens only the selected protocol ports plus the IAP SSH range.
+The SSH account is forwarding-only and has no interactive shell. Keep the
+printed REALITY link, OpenVPN profile and SSH private key secret.
