@@ -293,8 +293,8 @@ setup_reality() {
 
   UUID=$(cat /proc/sys/kernel/random/uuid)
   KEYS=$("$XRAY" x25519) || return 1
-  PRIVATE=$(printf '%s\n' "$KEYS" | awk -F': *' 'tolower($1) ~ /^private ?key$/ {print $2; exit}')
-  PUBLIC=$(printf '%s\n' "$KEYS" | awk -F': *' 'tolower($1) ~ /^(public ?key|password)$/ {print $2; exit}')
+  PRIVATE=$(printf '%s\n' "$KEYS" | awk -F': *' '/PrivateKey/ {print $2; exit}')
+  PUBLIC=$(printf '%s\n' "$KEYS" | awk -F': *' '/PublicKey/ {print $2; exit}')
   if [ -z "$PRIVATE" ] || [ -z "$PUBLIC" ]; then
     echo "ERROR: could not parse the output of 'xray x25519':"
     echo "$KEYS"
