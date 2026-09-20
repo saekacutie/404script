@@ -96,7 +96,7 @@ render_gate_screen() {
     box_line "for VLESS / VMess / Trojan / Shadowsocks"
     box_blank
     box_line "SUPPORTED PROXY ENGINES" "${BOLD}${CYAN}"
-    box_line "HAProxy · Envoy · Caddy · Traefik · OpenResty"
+    box_line "HAProxy · Envoy · Caddy · H2O · Traefik · OpenResty"
     box_blank
     box_line "SUPPORTED TRANSPORTS" "${BOLD}${CYAN}"
     box_line "WebSocket · HTTPUpgrade · XHTTP · gRPC* · H2 · SSH-WS"
@@ -169,16 +169,23 @@ echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${YELLOW}1) HAProxy    - full protocol support incl. gRPC (recommended)${RESET}"
 echo -e "  ${YELLOW}2) Envoy      - full protocol support incl. gRPC (fast & stable)${RESET}"
 echo -e "  ${YELLOW}3) Caddy      - full protocol support incl. gRPC (fast & stable)${RESET}"
-echo -e "  ${YELLOW}4) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
-echo -e "  ${YELLOW}5) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
+echo -e "  ${YELLOW}4) H2O        - full protocol support incl. gRPC${RESET}"
+echo -e "  ${YELLOW}5) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
+echo -e "  ${YELLOW}6) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
+echo -e "  ${YELLOW}7) SSH Gateway - standalone SSH-over-WS (+ UDPGW), not the VLESS/etc stack${RESET}"
+echo -e "  ${YELLOW}8) OVPN Relay  - standalone WS relay to a REAL OpenVPN server on a VM${RESET}"
 echo ""
-read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-6] (Default 1): ${RESET}")" ENGINE_CHOICE
+read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-8] (Default 1): ${RESET}")" ENGINE_CHOICE
 
+STANDALONE=0
 case "$ENGINE_CHOICE" in
     2) ENGINE="Envoy";      PROXY_ENV="envoy";;
     3) ENGINE="Caddy";      PROXY_ENV="caddy";;
-    4) ENGINE="Traefik";    PROXY_ENV="traefik";;
-    5) ENGINE="OpenResty";  PROXY_ENV="openresty";;
+    4) ENGINE="H2O";        PROXY_ENV="h2o";;
+    5) ENGINE="Traefik";    PROXY_ENV="traefik";;
+    6) ENGINE="OpenResty";  PROXY_ENV="openresty";;
+    7) ENGINE="SSH Gateway"; PROXY_ENV="ssh";        STANDALONE=1;;
+    8) ENGINE="OVPN Relay";  PROXY_ENV="ovpn-relay"; STANDALONE=1;;
     *) ENGINE="HAProxy";    PROXY_ENV="haproxy";;
 esac
 DOCKERFILE="proxies/${PROXY_ENV}/Dockerfile"
@@ -194,68 +201,21 @@ if [ "$PROXY_ENV" == "openresty" ]; then
 fi
 echo ""
 
-echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${GREEN}                  ADS MODE${RESET}"
-echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${YELLOW}1) No ads   - blocks known ad/tracker domains via DNS${RESET}"
-echo -e "  ${YELLOW}2) Ads      - normal DNS, no blocking${RESET}"
-read -r -p "$(echo -e "  ${CYAN}CHOICE [1-2] (Default 1): ${RESET}")" ADS_CHOICE
-case "$ADS_CHOICE" in
-    2) ADS_MODE="ads";;
-    *) ADS_MODE="noads";;
-esac
-echo -e "  ${GREEN}ADS MODE: ${ADS_MODE}${RESET}"
-echo ""
-
-# ------------------------------------------------------------------------
-# SSH TUNNEL USERS (SSH-over-WS at /saeka-ssh)
-# Provisioned at CONTAINER START, not baked into the image - the same
-# pattern ADS_MODE already uses. Passwords are auto-generated here (never
-# typed, never logged) unless you choose to set your own. This builds an
-# SSH_USERS env var that entrypoint.sh reads to create forwarding-only
-# accounts (no shell, no TTY - just `ssh -D` tunnel endpoints).
-# ------------------------------------------------------------------------
-echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${GREEN}           SSH TUNNEL USERS (SSH-over-WS)${RESET}"
-echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${YELLOW}Adds forwarding-only SSH accounts at /saeka-ssh - no shell, no${RESET}"
-echo -e "  ${YELLOW}login, just a SOCKS tunnel endpoint (ssh -D). Needs ws_bridge.py${RESET}"
-echo -e "  ${YELLOW}client-side, since plain ssh doesn't speak WebSocket.${RESET}"
-echo ""
-
-SSH_USER_LIST=()
-if [ -x "$(command -v openssl)" ]; then
-    GEN_PW() { openssl rand -base64 12 | tr -dc 'A-Za-z0-9' | head -c16; }
-else
-    GEN_PW() { < /dev/urandom tr -dc 'A-Za-z0-9' | head -c16; }
-fi
-
-read -r -p "$(echo -e "  ${CYAN}Add an SSH tunnel user? [y/N]: ${RESET}")" ADD_SSH
-while [[ "$ADD_SSH" =~ ^[Yy] ]]; do
-    read -r -p "$(echo -e "  ${CYAN}Username [saeka]: ${RESET}")" SSH_UNAME
-    SSH_UNAME=${SSH_UNAME:-saeka}
-    # Strip characters that would break the user:pass / comma / @ delimiter
-    # scheme below (also keeps sshd/useradd happy with the result).
-    SSH_UNAME=$(printf '%s' "$SSH_UNAME" | tr -dc 'A-Za-z0-9_-')
-    read -r -p "$(echo -e "  ${CYAN}Password (blank = auto-generate): ${RESET}")" SSH_PW
-    if [ -z "$SSH_PW" ]; then
-        SSH_PW=$(GEN_PW)
-        echo -e "  ${GREEN}Generated password for ${SSH_UNAME}: ${SSH_PW}${RESET}"
-        echo -e "  ${YELLOW}(shown once - write it down now)${RESET}"
-    fi
-    SSH_USER_LIST+=("${SSH_UNAME}:${SSH_PW}")
+ADS_MODE="n/a"
+if [ "$STANDALONE" -eq 0 ]; then
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${GREEN}                  ADS MODE${RESET}"
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${YELLOW}1) No ads   - blocks known ad/tracker domains via DNS${RESET}"
+    echo -e "  ${YELLOW}2) Ads      - normal DNS, no blocking${RESET}"
+    read -r -p "$(echo -e "  ${CYAN}CHOICE [1-2] (Default 1): ${RESET}")" ADS_CHOICE
+    case "$ADS_CHOICE" in
+        2) ADS_MODE="ads";;
+        *) ADS_MODE="noads";;
+    esac
+    echo -e "  ${GREEN}ADS MODE: ${ADS_MODE}${RESET}"
     echo ""
-    read -r -p "$(echo -e "  ${CYAN}Add another? [y/N]: ${RESET}")" ADD_SSH
-done
-
-SSH_USERS_CSV=""
-if [ "${#SSH_USER_LIST[@]}" -gt 0 ]; then
-    SSH_USERS_CSV=$(IFS=,; echo "${SSH_USER_LIST[*]}")
-    echo -e "  ${GREEN}${#SSH_USER_LIST[@]} SSH tunnel user(s) configured.${RESET}"
-else
-    echo -e "  ${YELLOW}No SSH tunnel users added - /saeka-ssh will run but nothing can authenticate.${RESET}"
 fi
-echo ""
 
 if [ -f "./regions.sh" ]; then
     source ./regions.sh
@@ -332,15 +292,49 @@ if ! run_quiet "Building ${ENGINE} image" build.log \
 fi
 rm -f "$CB_CONFIG"
 
-if [ -n "$SSH_USERS_CSV" ]; then
-    # SSH_USERS_CSV already contains both ',' (between users) and ':'
-    # (inside each user:pass pair), so gcloud's normal comma-delimited
-    # --set-env-vars can't carry it safely alongside ADS_MODE. The
-    # "^SEP^" prefix switches the delimiter for the WHOLE value to
-    # something that appears in neither var - '@' never shows up in
-    # ADS_MODE, in a generated password (alphanumeric only), or in any
-    # reasonable username.
-    ENV_VARS="^@^ADS_MODE=${ADS_MODE}@SSH_USERS=${SSH_USERS_CSV}"
+SSH_USERS_CSV=""
+if [ "$PROXY_ENV" == "ssh" ]; then
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${GREEN}           SSH GATEWAY - TUNNEL USERS${RESET}"
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${YELLOW}Path: /saeka-ssh (fake-WS-handshake + raw passthrough, matching${RESET}"
+    echo -e "  ${YELLOW}HTTP Injector / NPV Tunnel style clients - not real RFC6455 WS).${RESET}"
+    echo ""
+    SSH_USER_LIST=()
+    read -r -p "$(echo -e "  ${CYAN}Add an SSH user? [y/N]: ${RESET}")" ADD_SSH
+    while [[ "$ADD_SSH" =~ ^[Yy] ]]; do
+        read -r -p "$(echo -e "  ${CYAN}Username [saeka]: ${RESET}")" SSH_UNAME
+        SSH_UNAME=$(printf '%s' "${SSH_UNAME:-saeka}" | tr -dc 'A-Za-z0-9_-')
+        read -r -p "$(echo -e "  ${CYAN}Password (blank = auto-generate): ${RESET}")" SSH_PW
+        if [ -z "$SSH_PW" ]; then
+            SSH_PW=$(< /dev/urandom tr -dc 'A-Za-z0-9' | head -c16)
+            echo -e "  ${GREEN}Generated password for ${SSH_UNAME}: ${SSH_PW}${RESET}"
+            echo -e "  ${YELLOW}(shown once - write it down now)${RESET}"
+        fi
+        SSH_USER_LIST+=("${SSH_UNAME}:${SSH_PW}")
+        read -r -p "$(echo -e "  ${CYAN}Add another? [y/N]: ${RESET}")" ADD_SSH
+    done
+    if [ "${#SSH_USER_LIST[@]}" -gt 0 ]; then
+        SSH_USERS_CSV=$(IFS=,; echo "${SSH_USER_LIST[*]}")
+    fi
+    echo ""
+    ENV_VARS="^@^SSH_USERS=${SSH_USERS_CSV}"
+elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${GREEN}           OVPN RELAY - UPSTREAM VM${RESET}"
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${YELLOW}This does NOT run OpenVPN itself - it forwards /saeka-ovpn to a${RESET}"
+    echo -e "  ${YELLOW}real OpenVPN server on a VM (see deploy_vm.py). Deploy that VM${RESET}"
+    echo -e "  ${YELLOW}FIRST and have its static IP ready.${RESET}"
+    echo ""
+    read -r -p "$(echo -e "  ${CYAN}OpenVPN VM static IP: ${RESET}")" OVPN_HOST
+    read -r -p "$(echo -e "  ${CYAN}OpenVPN port [1194]: ${RESET}")" OVPN_PORT
+    OVPN_PORT=${OVPN_PORT:-1194}
+    if [ -z "$OVPN_HOST" ]; then
+        echo -e "  ${RED}No IP given - the relay will start but every connection will fail.${RESET}"
+    fi
+    echo ""
+    ENV_VARS="^@^OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
 else
     ENV_VARS="ADS_MODE=${ADS_MODE}"
 fi
@@ -382,21 +376,42 @@ echo ""
 echo -e "  ${CYAN}RAW HOST   ${GREEN}https://${CLEAN_HOST}${RESET}"
 echo -e "  ${CYAN}TIER       ${GREEN}${DEPLOY_NOTE}${RESET}"
 echo -e "  ${CYAN}ENGINE     ${GREEN}${ENGINE}${RESET}"
-echo -e "  ${CYAN}ADS MODE   ${GREEN}${ADS_MODE}${RESET}"
+if [ "$STANDALONE" -eq 0 ]; then
+    echo -e "  ${CYAN}ADS MODE   ${GREEN}${ADS_MODE}${RESET}"
+fi
 echo -e "  ${CYAN}CPU / RAM  ${GREEN}${CPU} vCPU / ${RAM}${RESET}"
 echo ""
 echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
-echo -e "  ${CYAN}                    PATHS & PROTOCOLS${RESET}"
-echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
-echo -e "  ${GREEN}VLESS${RESET}        | WS: /vless-saeka   | HU: /vless-saeka-hu   | XH: /vless-saeka-xh   | gRPC: /vless-saeka-grpc   | H2: /vless-saeka-h2"
-echo -e "  ${GREEN}VMess${RESET}        | WS: /vmess-saeka   | HU: /vmess-saeka-hu   | XH: /vmess-saeka-xh   | gRPC: /vmess-saeka-grpc   | H2: /vmess-saeka-h2"
-echo -e "  ${GREEN}TROJAN${RESET}       | WS: /saeka-tojirp  | HU: /saeka-tojirp-hu  | XH: /saeka-tojirp-xh  | gRPC: /saeka-tojirp-grpc  | H2: /saeka-tojirp-h2"
-echo -e "  ${GREEN}Shadowsocks${RESET}  | WS: /ss-saeka      | HU: /ss-saeka-hu      | XH: /ss-saeka-xh      | gRPC: /ss-saeka-grpc      | H2: /ss-saeka-h2"
-echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
-if [ -n "$SSH_USERS_CSV" ]; then
-    echo -e "  ${GREEN}SSH-WS${RESET}       | /saeka-ssh  (needs ws_bridge.py client-side - plain ssh can't speak WS)"
-    echo -e "  ${CYAN}  python3 ws_bridge.py --local-port 2222 --remote wss://${CLEAN_HOST}/saeka-ssh${RESET}"
-    echo -e "  ${CYAN}  ssh -p 2222 -o UserKnownHostsFile=/dev/null <user>@127.0.0.1${RESET}"
+if [ "$PROXY_ENV" == "ssh" ]; then
+    echo -e "  ${CYAN}                  SSH GATEWAY${RESET}"
+    echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
+    echo -e "  ${GREEN}Path: /saeka-ssh${RESET}  (fake-handshake WS, not real RFC6455 -"
+    echo -e "  matches HTTP Injector / NPV Tunnel style clients)"
+    if [ -n "$SSH_USERS_CSV" ]; then
+        echo -e "  ${CYAN}Users configured: ${GREEN}$(echo "$SSH_USERS_CSV" | tr ',' '\n' | cut -d: -f1 | paste -sd, -)${RESET}"
+    else
+        echo -e "  ${YELLOW}No users were added - a one-off random account was generated in${RESET}"
+        echo -e "  ${YELLOW}the container logs (won't survive a redeploy). Re-run and add one.${RESET}"
+    fi
+    echo -e "  ${CYAN}Point your SSH-over-WS client at:${RESET}"
+    echo -e "  ${CYAN}  wss://${CLEAN_HOST}/saeka-ssh${RESET}"
+elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
+    echo -e "  ${CYAN}                  OVPN RELAY${RESET}"
+    echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
+    echo -e "  ${GREEN}Path: /saeka-ovpn${RESET}  -> forwards to ${OVPN_HOST}:${OVPN_PORT}"
+    echo -e "  ${YELLOW}This is only useful once that VM is actually running OpenVPN${RESET}"
+    echo -e "  ${YELLOW}(deploy_vm.py). This service does not run OpenVPN itself.${RESET}"
+    echo -e "  ${CYAN}Point your client-side WS wrapper at:${RESET}"
+    echo -e "  ${CYAN}  wss://${CLEAN_HOST}/saeka-ovpn${RESET}"
+else
+    echo -e "  ${CYAN}                    PATHS & PROTOCOLS${RESET}"
+    echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
+    echo -e "  ${GREEN}VLESS${RESET}        | WS: /vless-saeka   | HU: /vless-saeka-hu   | XH: /vless-saeka-xh   | gRPC: /vless-saeka-grpc   | H2: /vless-saeka-h2"
+    echo -e "  ${GREEN}VMess${RESET}        | WS: /vmess-saeka   | HU: /vmess-saeka-hu   | XH: /vmess-saeka-xh   | gRPC: /vmess-saeka-grpc   | H2: /vmess-saeka-h2"
+    echo -e "  ${GREEN}TROJAN${RESET}       | WS: /saeka-tojirp  | HU: /saeka-tojirp-hu  | XH: /saeka-tojirp-xh  | gRPC: /saeka-tojirp-grpc  | H2: /saeka-tojirp-h2"
+    echo -e "  ${GREEN}Shadowsocks${RESET}  | WS: /ss-saeka      | HU: /ss-saeka-hu      | XH: /ss-saeka-xh      | gRPC: /ss-saeka-grpc      | H2: /ss-saeka-h2"
+    echo -e "  ${GREEN}For SSH-WS or an OpenVPN relay, deploy engines 7/8 as their own${RESET}"
+    echo -e "  ${GREEN}separate service instead of mixing them into this one.${RESET}"
 fi
 echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
 if [ "$PROXY_ENV" == "openresty" ]; then
