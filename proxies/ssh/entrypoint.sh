@@ -79,7 +79,7 @@ def handle(client):
     try:
         tune_socket(client)
         client.recv(4096)
-        client.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        client.sendall(b"HTTP/1.1 101 SAEKA GCP SERVER\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
         ssh = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         tune_socket(ssh)
         ssh.connect(('127.0.0.1', 22))
