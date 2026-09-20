@@ -1,68 +1,91 @@
 #!/usr/bin/env python3
-"""Fake-WebSocket handshake, then raw byte relay.
+import sys
+import socket
+import asyncio
+import logging
+import websockets
 
-usage: ws_bridge.py LISTEN_PORT UPSTREAM_HOST UPSTREAM_PORT NAME
+logging.basicConfig(level=logging.INFO, format="[ws_bridge] %(asctime)s - %(levelname)s - %(message)s")
 
-Deliberately NOT real RFC6455: it answers with a canned "101 Switching
-Protocols" without validating the request, then relays raw bytes with no
-frame headers. That is what HTTP Injector / NPV-Tunnel style clients expect;
-a strict RFC6455 bridge would not interoperate with them.
-"""
-import socket, sys, threading
+LISTEN_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 2223
+TARGET_HOST = sys.argv[2] if len(sys.argv) > 2 else ""
+TARGET_PORT = int(sys.argv[3]) if len(sys.argv) > 3 else 1194
 
-LISTEN_PORT = int(sys.argv[1])
-UP_HOST     = sys.argv[2]
-UP_PORT     = int(sys.argv[3])
-NAME        = sys.argv[4]
-BUF_SIZE    = 65536
-RESPONSE = (b"HTTP/1.1 101 Switching Protocols\r\n"
-            b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+async def handle_client(websocket):
+    if not TARGET_HOST:
+        logging.error("Target host not configured!")
+        await websocket.close(1011, "Upstream host not configured")
+        return
 
-def tune_socket(sock):
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    client_addr = websocket.remote_address
+    logging.info(f"New client connected: {client_addr}")
+
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
-    except OSError:
-        pass
-
-def bridge(src, dst):
-    try:
-        while True:
-            data = src.recv(BUF_SIZE)
-            if not data:
-                break
-            dst.sendall(data)
-    except Exception:
-        pass
-    finally:
-        for s in (src, dst):
-            try: s.close()
-            except Exception: pass
-
-def handle(client):
-    try:
-        tune_socket(client)
-        client.settimeout(10)
-        client.recv(4096)                 # the client's upgrade request
-        client.settimeout(None)
-        client.sendall(RESPONSE)
-        up = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        tune_socket(up)
-        up.settimeout(10)
-        up.connect((UP_HOST, UP_PORT))
-        up.settimeout(None)
-        threading.Thread(target=bridge, args=(client, up), daemon=True).start()
-        threading.Thread(target=bridge, args=(up, client), daemon=True).start()
+        reader, writer = await asyncio.open_connection(TARGET_HOST, TARGET_PORT)
+        sock = writer.get_extra_info('socket')
+        if sock:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
     except Exception as e:
-        print(f"[bridge:{NAME}] upstream connect failed: {e}", flush=True)
-        try: client.close()
-        except Exception: pass
+        logging.error(f"Failed to connect to upstream {TARGET_HOST}:{TARGET_PORT} - {e}")
+        await websocket.close(1011, "Upstream connection failed")
+        return
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind(('127.0.0.1', LISTEN_PORT))
-server.listen(200)
-while True:
-    c, _ = server.accept()
-    threading.Thread(target=handle, args=(c,), daemon=True).start()
+    async def ws_to_tcp():
+        try:
+            async for message in websocket:
+                if isinstance(message, str):
+                    message = message.encode('utf-8')
+                writer.write(message)
+                await writer.drain()
+        except (websockets.exceptions.ConnectionClosed, ConnectionResetError, BrokenPipeError):
+            pass
+        except Exception as e:
+            logging.debug(f"ws_to_tcp error: {e}")
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def tcp_to_ws():
+        try:
+            while True:
+                data = await reader.read(65536)
+                if not data:
+                    break
+                await websocket.send(data)
+        except (websockets.exceptions.ConnectionClosed, ConnectionResetError, BrokenPipeError):
+            pass
+        except Exception as e:
+            logging.debug(f"tcp_to_ws error: {e}")
+        finally:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+
+    try:
+        await asyncio.gather(ws_to_tcp(), tcp_to_ws(), return_exceptions=True)
+    finally:
+        logging.info(f"Client disconnected: {client_addr}")
+
+async def main():
+    logging.info(f"Starting WS bridge on 0.0.0.0:{LISTEN_PORT} -> {TARGET_HOST}:{TARGET_PORT}")
+    async with websockets.serve(
+        handle_client,
+        "0.0.0.0",
+        LISTEN_PORT,
+        max_size=None,
+        ping_interval=20,
+        ping_timeout=20,
+        max_queue=1024
+    ):
+        await asyncio.Future()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
