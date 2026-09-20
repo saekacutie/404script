@@ -380,6 +380,44 @@ prompt_ovpn_upstream() {
         fi
     fi
 
+    # Nothing usable on disk. Cloud Run itself cannot run OpenVPN - it only
+    # takes HTTP/HTTPS on one port, no raw TCP/UDP ingress - so there is no
+    # IP to "auto-detect" until an actual VM exists. Offer to provision one
+    # right now instead of just asking you to type an IP from nowhere.
+    if [ -z "$OVPN_HOST" ] && [ -f "${SCRIPT_DIR}/deploy_vm.py" ] && command -v python3 >/dev/null 2>&1; then
+        local provision="N"
+        if [ "$AUTO" -eq 1 ]; then
+            provision="${DEPLOY_PROVISION_VM:-Y}"
+            echo -e "  ${YELLOW}No OpenVPN VM found.${RESET} ${CYAN}Provisioning one now via deploy_vm.py --auto${RESET} -> ${GREEN}${provision}${RESET}"
+        else
+            echo -e "  ${YELLOW}No OpenVPN VM found on this machine yet.${RESET}"
+            read -r -p "$(echo -e "  ${CYAN}Provision one automatically now (deploy_vm.py --auto)? [Y/n]: ${RESET}")" provision
+            provision=${provision:-Y}
+        fi
+        if [[ "$provision" =~ ^[Yy] ]]; then
+            echo -e "  ${CYAN}Running deploy_vm.py --auto (SSH tunnel off, OpenVPN on, proto tcp)...${RESET}"
+            (
+                cd "$SCRIPT_DIR"
+                DEPLOY_VM_AUTO=1 \
+                DEPLOY_VM_ENABLE_SSH="${DEPLOY_VM_ENABLE_SSH:-n}" \
+                DEPLOY_VM_ENABLE_OVPN=y \
+                DEPLOY_VM_ENABLE_REALITY="${DEPLOY_VM_ENABLE_REALITY:-n}" \
+                DEPLOY_VM_OVPN_PROTO=tcp \
+                SSH_USERS="${SSH_USERS:-$SSH_USERS_CSV}" \
+                python3 deploy_vm.py --auto
+            )
+            local new_info
+            new_info=$(ls -t "$info_dir"/*-info.json 2>/dev/null | head -n1 || true)
+            if [ -n "$new_info" ] && command -v jq >/dev/null 2>&1; then
+                OVPN_HOST=$(jq -r '.host' "$new_info")
+                OVPN_PORT=$(jq -r '.ovpn_port' "$new_info")
+                echo -e "  ${GREEN}VM ready: ${OVPN_HOST}:${OVPN_PORT}${RESET}"
+            else
+                echo -e "  ${RED}deploy_vm.py finished but no info file was found - falling back to manual entry.${RESET}"
+            fi
+        fi
+    fi
+
     while [ -z "$OVPN_HOST" ]; do
         if [ "$AUTO" -eq 1 ]; then
             if [ -z "${DEPLOY_OVPN_HOST:-}" ]; then
