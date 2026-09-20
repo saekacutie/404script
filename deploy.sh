@@ -190,12 +190,13 @@ echo -e "  ${YELLOW}5) Traefik    - full protocol support incl. gRPC (recommende
 echo -e "  ${YELLOW}6) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
 echo -e "  ${YELLOW}7) SSH Gateway - standalone SSH-over-WS (+ UDPGW), optional OpenVPN relay + /cert${RESET}"
 echo -e "  ${YELLOW}8) OVPN Relay  - standalone WS relay to a REAL OpenVPN server on a VM (+ /cert)${RESET}"
+echo -e "  ${YELLOW}9) Reality Combo - VLESS+XHTTP+REALITY on a VM + Cloud Run relay (+ SSH-WS, OpenVPN-WS, /cert)${RESET}"
 echo ""
 if [ "$AUTO" -eq 1 ]; then
     ENGINE_CHOICE="${DEPLOY_ENGINE_CHOICE:-7}"
-    echo -e "  ${CYAN}SELECT PROXY ENGINE [1-8]${RESET} -> ${GREEN}${ENGINE_CHOICE}${RESET}"
+    echo -e "  ${CYAN}SELECT PROXY ENGINE [1-9]${RESET} -> ${GREEN}${ENGINE_CHOICE}${RESET}"
 else
-    read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-8] (Default 1): ${RESET}")" ENGINE_CHOICE
+    read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-9] (Default 1): ${RESET}")" ENGINE_CHOICE
 fi
 
 STANDALONE=0
@@ -207,6 +208,7 @@ case "$ENGINE_CHOICE" in
     6) ENGINE="OpenResty";  PROXY_ENV="openresty";;
     7) ENGINE="SSH Gateway"; PROXY_ENV="ssh";        STANDALONE=1;;
     8) ENGINE="OVPN Relay";  PROXY_ENV="ovpn-relay"; STANDALONE=1;;
+    9) ENGINE="Reality Combo"; PROXY_ENV="reality";  STANDALONE=1;;
     *) ENGINE="HAProxy";    PROXY_ENV="haproxy";;
 esac
 DOCKERFILE="proxies/${PROXY_ENV}/Dockerfile"
@@ -337,7 +339,7 @@ fi
 rm -f "$CB_CONFIG"
 
 # ------------------------------------------------------------------------
-# Prompts shared by the SSH gateway (7) and OVPN relay (8)
+# Prompts shared by the SSH gateway (7), OVPN relay (8) and Reality Combo (9)
 # ------------------------------------------------------------------------
 prompt_ovpn_upstream() {
     OVPN_HOST=""
@@ -449,10 +451,15 @@ prompt_ovpn_upstream() {
 }
 
 # Embeds the client .ovpn written by deploy_vm.py so /cert can serve it.
+# OVPN_PROFILE_FILE (set by engine 9) pins it to that VM's profile; otherwise
+# the newest ~/.deploy_vm/*-client1.ovpn is used.
 prompt_ovpn_profile() {
     OVPN_PROFILE_B64=""
     local f
-    f=$(ls -t "$HOME"/.deploy_vm/*-client1.ovpn 2>/dev/null | head -n1 || true)
+    f="${OVPN_PROFILE_FILE:-}"
+    if [ -z "$f" ] || [ ! -f "$f" ]; then
+        f=$(ls -t "$HOME"/.deploy_vm/*-client1.ovpn 2>/dev/null | head -n1 || true)
+    fi
     if [ -z "$f" ]; then
         echo -e "  ${YELLOW}No profile from deploy_vm.py found in ~/.deploy_vm - /cert stays disabled.${RESET}"
         return 0
@@ -532,6 +539,174 @@ collect_users() {
     fi
 }
 
+# ---- Reality Combo (engine 9) helpers --------------------------------------
+
+# jget FILE dotted.path -> value (strings raw, everything else as JSON); empty if missing
+jget() {
+    python3 - "$1" "$2" <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        node = json.load(f)
+    for part in sys.argv[2].split("."):
+        node = node[part]
+except Exception:
+    sys.exit(0)
+print(node if isinstance(node, str) else json.dumps(node))
+PYEOF
+}
+
+# "/vless-saeka-xh" -> "%2Fvless-saeka-xh" (paths are validated to [A-Za-z0-9._~/-])
+urlenc_path() {
+    local p="$1"
+    printf '%s' "${p//\//%2F}"
+}
+
+# First UP zone in $REGION so the VM sits next to the Cloud Run service.
+pick_zone() {
+    local zones z
+    zones=$(gcloud compute zones list --project="$PROJECT_ID" --filter="status=UP" --format='value(name)' 2>/dev/null || true)
+    for z in $zones; do
+        if [[ "$z" =~ ^${REGION}-[a-z]$ ]]; then
+            printf '%s' "$z"
+            return 0
+        fi
+    done
+    printf '%s' "${REGION}-a"
+}
+
+# Finds (or provisions via deploy_vm.py --auto) the VM that runs VLESS+XHTTP+REALITY
+# and loads everything Cloud Run needs from its ~/.deploy_vm/<name>-info.json.
+prompt_reality_vm() {
+    local info_dir="$HOME/.deploy_vm" f chosen="" pick provision ovpn_yn ovpn_flag vm_name zone
+    local candidates=()
+    R_VM_NAME=""; R_HOST=""; R_VM_IP=""; R_UUID=""; R_PBK=""; R_SID=""; R_SNI=""
+    R_PORT=""; R_PATH=""; R_MODE=""; R_RELAY_PORT=""; R_RELAY_PATH=""; R_RELAY_CERT_B64=""
+    OVPN_HOST=""; OVPN_PORT=""; OVPN_PROFILE_FILE=""
+
+    if [ -d "$info_dir" ]; then
+        while IFS= read -r f; do
+            if [ "$(jget "$f" reality.transport)" = "xhttp" ] && [ "$(jget "$f" reality.relay.enabled)" = "true" ]; then
+                candidates+=("$f")
+            fi
+        done < <(ls -t "$info_dir"/*-info.json 2>/dev/null)
+    fi
+
+    if [ "${#candidates[@]}" -gt 0 ]; then
+        chosen="${candidates[0]}"
+        if [ "${#candidates[@]}" -gt 1 ]; then
+            echo -e "  ${CYAN}Found multiple REALITY+XHTTP VMs from deploy_vm.py:${RESET}"
+            local i=1
+            for f in "${candidates[@]}"; do
+                echo -e "  ${YELLOW}${i}) $(jget "$f" vm_name) - $(jget "$f" host)${RESET}"
+                i=$((i + 1))
+            done
+            if [ "$AUTO" -eq 1 ]; then
+                pick="${DEPLOY_VM_PICK:-1}"
+                echo -e "  ${CYAN}Pick one${RESET} -> ${GREEN}${pick}${RESET}"
+            else
+                read -r -p "$(echo -e "  ${CYAN}Pick one [1]: ${RESET}")" pick
+            fi
+            pick=${pick:-1}
+            if ! [[ "$pick" =~ ^[0-9]+$ ]] || [ "$pick" -lt 1 ] || [ "$pick" -gt "${#candidates[@]}" ]; then
+                pick=1
+            fi
+            chosen="${candidates[$((pick - 1))]}"
+        fi
+        echo -e "  ${GREEN}Using existing VM $(jget "$chosen" vm_name) from deploy_vm.py.${RESET}"
+    else
+        if [ ! -f "${SCRIPT_DIR}/deploy_vm.py" ]; then
+            echo -e "  ${RED}deploy_vm.py not found next to deploy.sh - engine 9 needs it to create the VM.${RESET}"
+            exit 1
+        fi
+        provision="Y"
+        if [ "$AUTO" -eq 1 ]; then
+            provision="${DEPLOY_PROVISION_VM:-Y}"
+            echo -e "  ${YELLOW}No REALITY+XHTTP VM found.${RESET} ${CYAN}Provisioning one via deploy_vm.py --auto${RESET} -> ${GREEN}${provision}${RESET}"
+        else
+            echo -e "  ${YELLOW}No REALITY+XHTTP VM found on this machine yet.${RESET}"
+            read -r -p "$(echo -e "  ${CYAN}Provision one automatically now (deploy_vm.py --auto)? [Y/n]: ${RESET}")" provision
+            provision=${provision:-Y}
+        fi
+        if ! [[ "$provision" =~ ^[Yy] ]]; then
+            echo -e "  ${RED}Engine 9 needs the VM. Run 'python3 deploy_vm.py' first, then re-run this.${RESET}"
+            exit 1
+        fi
+        if [ "$AUTO" -eq 1 ]; then
+            ovpn_yn="${DEPLOY_VM_ENABLE_OVPN:-y}"
+            echo -e "  ${CYAN}Also run OpenVPN on the VM (for /saeka-ovpn + /cert)?${RESET} -> ${GREEN}${ovpn_yn}${RESET}"
+        else
+            read -r -p "$(echo -e "  ${CYAN}Also run OpenVPN on the VM (for /saeka-ovpn + /cert)? [Y/n]: ${RESET}")" ovpn_yn
+        fi
+        ovpn_flag="y"
+        if [[ "$ovpn_yn" =~ ^[Nn] ]]; then
+            ovpn_flag="n"
+        fi
+        vm_name="${DEPLOY_VM_VM_NAME:-${SERVICE_NAME}-tcp}"
+        zone="${DEPLOY_VM_GCE_ZONE:-$(pick_zone)}"
+        echo -e "  ${CYAN}Running deploy_vm.py --auto: ${vm_name} in ${zone} (REALITY+XHTTP, relay on, OpenVPN ${ovpn_flag})...${RESET}"
+        if ! (
+            cd "$SCRIPT_DIR"
+            DEPLOY_VM_AUTO=1 \
+            DEPLOY_VM_VM_NAME="$vm_name" \
+            DEPLOY_VM_GCE_ZONE="$zone" \
+            DEPLOY_VM_ENABLE_REALITY=y \
+            DEPLOY_VM_REALITY_TRANSPORT=xhttp \
+            DEPLOY_VM_ENABLE_RELAY=y \
+            DEPLOY_VM_ENABLE_OVPN="$ovpn_flag" \
+            DEPLOY_VM_ENABLE_SSH="${DEPLOY_VM_ENABLE_SSH:-n}" \
+            DEPLOY_VM_OVPN_PROTO=tcp \
+            SSH_USERS="$SSH_USERS_CSV" \
+            python3 deploy_vm.py --auto
+        ); then
+            echo -e "  ${RED}deploy_vm.py failed - see its output above.${RESET}"
+            exit 1
+        fi
+        chosen="$info_dir/${vm_name}-info.json"
+        if [ ! -f "$chosen" ]; then
+            echo -e "  ${RED}deploy_vm.py finished but ${chosen} was not written.${RESET}"
+            exit 1
+        fi
+    fi
+
+    if [ "$(jget "$chosen" reality.transport)" != "xhttp" ] || [ "$(jget "$chosen" reality.relay.enabled)" != "true" ]; then
+        echo -e "  ${RED}$(jget "$chosen" vm_name) is not running REALITY+XHTTP with the relay listener.${RESET}"
+        echo -e "  ${YELLOW}It was built earlier (or REALITY failed). Delete it and re-run so it is rebuilt:${RESET}"
+        echo -e "  ${YELLOW}  gcloud compute instances delete $(jget "$chosen" vm_name) --zone $(jget "$chosen" zone)${RESET}"
+        exit 1
+    fi
+
+    R_VM_NAME=$(jget "$chosen" vm_name)
+    R_HOST=$(jget "$chosen" host)
+    R_VM_IP=$(jget "$chosen" ip)
+    R_UUID=$(jget "$chosen" reality.uuid)
+    R_PBK=$(jget "$chosen" reality.publicKey)
+    R_SID=$(jget "$chosen" reality.shortId)
+    R_SNI=$(jget "$chosen" reality.serverName)
+    R_PORT=$(jget "$chosen" reality.port)
+    R_PATH=$(jget "$chosen" reality.path)
+    R_MODE=$(jget "$chosen" reality.mode)
+    R_RELAY_PORT=$(jget "$chosen" reality.relay.port)
+    R_RELAY_PATH=$(jget "$chosen" reality.relay.path)
+    R_RELAY_CERT_B64=$(jget "$chosen" reality.relay.certB64)
+    if [ -z "$R_VM_IP" ] || [ -z "$R_UUID" ] || [ -z "$R_PBK" ] || [ -z "$R_RELAY_CERT_B64" ]; then
+        echo -e "  ${RED}${chosen} is missing REALITY/relay details - delete the VM and re-run.${RESET}"
+        exit 1
+    fi
+    echo -e "  ${GREEN}VM ${R_VM_NAME}: ${R_VM_IP}  REALITY tcp/${R_PORT}  relay tcp/${R_RELAY_PORT}${RESET}"
+
+    # OpenVPN on the same VM feeds /saeka-ovpn and /cert (tcp only).
+    if [ "$(jget "$chosen" ovpn_enabled)" = "true" ]; then
+        if [ "$(jget "$chosen" ovpn_proto)" = "tcp" ]; then
+            OVPN_HOST="$R_VM_IP"
+            OVPN_PORT=$(jget "$chosen" ovpn_port)
+            OVPN_PROFILE_FILE="$info_dir/${R_VM_NAME}-client1.ovpn"
+        else
+            echo -e "  ${YELLOW}The VM's OpenVPN is proto udp - the Cloud Run relay needs tcp, so /saeka-ovpn is skipped.${RESET}"
+        fi
+    fi
+}
+
 OVPN_HOST=""
 OVPN_PORT=""
 OVPN_PROFILE_B64=""
@@ -583,6 +758,41 @@ elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
         else
             echo -e "  ${YELLOW}No users given - /cert disabled (it never serves the key without a login).${RESET}"
             OVPN_PROFILE_B64=""
+        fi
+    fi
+    echo ""
+elif [ "$PROXY_ENV" == "reality" ]; then
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${GREEN}        REALITY COMBO - VM + CLOUD RUN RELAY${RESET}"
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${YELLOW}VM (deploy_vm.py): VLESS+XHTTP+REALITY on tcp/443 (direct), a TLS relay${RESET}"
+    echo -e "  ${YELLOW}listener for Cloud Run, and optional OpenVPN (tcp).${RESET}"
+    echo -e "  ${YELLOW}Cloud Run: SSH-WS, OpenVPN-WS, /cert and an XHTTP relay to the VM.${RESET}"
+    echo ""
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo -e "  ${RED}python3 is required for this engine (reads the VM info files).${RESET}"
+        exit 1
+    fi
+    collect_users "SSH-WS, OpenVPN and the /cert download"
+    if [ -z "$SSH_USERS_CSV" ]; then
+        # OpenVPN logins and /cert both need at least one known user.
+        pw=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16 || true)
+        SSH_USERS_CSV="saeka:${pw}"
+        echo -e "  ${GREEN}No user given - generated login saeka: ${pw}${RESET}"
+        echo -e "  ${YELLOW}(shown once - write it down now)${RESET}"
+    fi
+    if [[ "$SSH_USERS_CSV" =~ [@[:space:]] ]]; then
+        echo -e "  ${RED}SSH_USERS can't contain @ or whitespace (it is passed as a Cloud Run env var).${RESET}"
+        exit 1
+    fi
+    echo ""
+    prompt_reality_vm
+    ENV_VARS="^@^SSH_USERS=${SSH_USERS_CSV}@XHTTP_UPSTREAM_HOST=${R_VM_IP}@XHTTP_UPSTREAM_PORT=${R_RELAY_PORT}@XHTTP_PATH=${R_RELAY_PATH}@XHTTP_RELAY_CERT_B64=${R_RELAY_CERT_B64}"
+    if [ -n "$OVPN_HOST" ]; then
+        ENV_VARS="${ENV_VARS}@OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
+        prompt_ovpn_profile
+        if [ -n "$OVPN_PROFILE_B64" ]; then
+            ENV_VARS="${ENV_VARS}@OVPN_PROFILE_B64=${OVPN_PROFILE_B64}"
         fi
     fi
     echo ""
@@ -686,6 +896,58 @@ elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     if [ -n "$OVPN_PROFILE_B64" ]; then
         echo -e "  ${CYAN}Profile ${GREEN}https://${CLEAN_HOST}/cert${CYAN}  (login: the /cert user you set)${RESET}"
     fi
+elif [ "$PROXY_ENV" == "reality" ]; then
+    REALITY_LINK="vless://${R_UUID}@${R_HOST}:${R_PORT}?encryption=none&security=reality&sni=${R_SNI}&fp=chrome&pbk=${R_PBK}&sid=${R_SID}&type=xhttp&path=$(urlenc_path "$R_PATH")&mode=${R_MODE}#saeka-reality-xhttp"
+    RELAY_LINK="vless://${R_UUID}@${CLEAN_HOST}:443?encryption=none&security=tls&sni=${CLEAN_HOST}&fp=chrome&type=xhttp&host=${CLEAN_HOST}&path=$(urlenc_path "$R_RELAY_PATH")&mode=packet-up#saeka-cloudrun-xhttp"
+    echo -e "  ${CYAN}              REALITY COMBO (VM + CLOUD RUN)${RESET}"
+    echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
+    echo -e "  ${CYAN}VM      ${GREEN}${R_VM_NAME} (${R_VM_IP})${RESET}"
+    echo -e "  ${CYAN}Users   ${GREEN}$(echo "$SSH_USERS_CSV" | tr ',' '\n' | cut -d: -f1 | paste -sd, -)${RESET}"
+    echo ""
+    echo -e "  ${GREEN}1) DIRECT - VLESS + XHTTP + REALITY (VM, no Google in the path)${RESET}"
+    echo -e "  ${WHITE}${REALITY_LINK}${RESET}"
+    echo ""
+    echo -e "  ${GREEN}2) VIA CLOUD RUN - VLESS + XHTTP + TLS (*.run.app, relayed to the VM)${RESET}"
+    echo -e "  ${WHITE}${RELAY_LINK}${RESET}"
+    echo ""
+    echo -e "  ${GREEN}3) SSH-WS${RESET}   ${CYAN}Host ${CLEAN_HOST}  Port 443 (TLS/SNI)  UDPGW 127.0.0.1:7300${RESET}"
+    echo -e "     ${CYAN}Payload ${GREEN}GET /saeka-ssh HTTP/1.1[crlf]Host: ${CLEAN_HOST}[crlf]Upgrade: websocket[crlf][crlf]${RESET}"
+    if [ -n "$OVPN_HOST" ]; then
+        echo -e "  ${GREEN}4) OpenVPN-WS${RESET}  ${CYAN}/saeka-ovpn -> ${OVPN_HOST}:${OVPN_PORT} (tcp)${RESET}"
+        echo -e "     ${CYAN}Payload ${GREEN}GET /saeka-ovpn HTTP/1.1[crlf]Host: ${CLEAN_HOST}[crlf]Upgrade: websocket[crlf][crlf]${RESET}"
+    fi
+    if [ -n "$OVPN_PROFILE_B64" ]; then
+        echo -e "  ${CYAN}Profile ${GREEN}https://${CLEAN_HOST}/cert${CYAN}  (login: one of the users above)${RESET}"
+    fi
+
+    # Keep everything in one private file so nothing is lost if the terminal scrolls.
+    mkdir -p "$HOME/.deploy_vm"
+    SUMMARY_FILE="$HOME/.deploy_vm/${SERVICE_NAME}-summary.txt"
+    (
+        umask 077
+        {
+            echo "Reality Combo - ${SERVICE_NAME} - $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "Cloud Run host : ${CLEAN_HOST}"
+            echo "VM             : ${R_VM_NAME} (${R_VM_IP})"
+            echo "Users          : $(echo "$SSH_USERS_CSV" | tr ',' '\n' | cut -d: -f1 | paste -sd, -)"
+            echo ""
+            echo "DIRECT (REALITY + XHTTP):"
+            echo "${REALITY_LINK}"
+            echo ""
+            echo "VIA CLOUD RUN (TLS + XHTTP, packet-up):"
+            echo "${RELAY_LINK}"
+            echo ""
+            echo "SSH-WS payload: GET /saeka-ssh HTTP/1.1[crlf]Host: ${CLEAN_HOST}[crlf]Upgrade: websocket[crlf][crlf]"
+            if [ -n "$OVPN_HOST" ]; then
+                echo "OpenVPN-WS payload: GET /saeka-ovpn HTTP/1.1[crlf]Host: ${CLEAN_HOST}[crlf]Upgrade: websocket[crlf][crlf]"
+            fi
+            if [ -n "$OVPN_PROFILE_B64" ]; then
+                echo "OpenVPN profile: https://${CLEAN_HOST}/cert"
+            fi
+        } > "$SUMMARY_FILE"
+    )
+    echo ""
+    echo -e "  ${CYAN}Saved to ${GREEN}${SUMMARY_FILE}${CYAN} (private, mode 600).${RESET}"
 else
     echo -e "  ${CYAN}                    PATHS & PROTOCOLS${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
@@ -884,6 +1146,9 @@ if [ -n "$LB_INPUT" ]; then
             echo -e "  ${YELLOW}2. You can connect IMMEDIATELY by setting 'allowInsecure: true' in your app${RESET}"
             echo -e "  ${YELLOW}   (same MITM caveat as Universal Mode above, until the real cert lands).${RESET}"
             echo -e "  ${YELLOW}3. In ~60 mins, Google will finish the real cert. You can then disable 'allowInsecure'.${RESET}"
+        fi
+        if [ "$PROXY_ENV" == "reality" ]; then
+            echo -e "  ${CYAN}Reality Combo: for the Cloud Run link (#2) swap the host and sni for ${GREEN}${FINAL_HOST}${CYAN} if you use this LB.${RESET}"
         fi
     else
         echo -e "  ${RED}Load balancer setup hit an error above - falling back to the raw Cloud Run host.${RESET}"
