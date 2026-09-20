@@ -1,39 +1,28 @@
 # docker build -f proxies/ssh/Dockerfile -t IMAGE .
-# Standalone SSH-over-WS gateway - not part of the VLESS/VMess/Trojan/SS
-# multi-protocol image. Same idea as the working reference this was built
-# from, on debian-slim instead of Ubuntu (smaller, same glibc badvpn needs
-# to build cleanly).
+# SSH-over-WebSocket gateway:
+#   nginx :8080 -> ws_bridge.py :2222 -> Dropbear :2200 (user/password)
+#   badvpn-udpgw :7300 (UDP over the SSH tunnel, reached via SSH port-forward)
 FROM debian:bookworm-slim
-ENV DEBIAN_FRONTEND=noninteractive
+ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        openssh-server nginx python3 cmake build-essential git ca-certificates \
+        dropbear-bin nginx python3 cmake build-essential git ca-certificates \
     && git clone --depth 1 https://github.com/ambrop72/badvpn.git /tmp/badvpn \
-    && cd /tmp/badvpn && mkdir build && cd build \
+    && mkdir /tmp/badvpn/build && cd /tmp/badvpn/build \
     && cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 \
-    && make install \
+    && make -j"$(nproc)" install \
     && cd / && rm -rf /tmp/badvpn \
     && apt-get purge -y cmake build-essential git \
     && apt-get autoremove -y \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /var/run/sshd \
-    && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config \
-    && sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config \
-    && { \
-        echo "UseDNS no"; \
-        echo "TCPKeepAlive yes"; \
-        echo "ClientAliveInterval 15"; \
-        echo "ClientAliveCountMax 3"; \
-        echo "MaxSessions 50"; \
-        echo "MaxStartups 50:30:100"; \
-        echo "Compression no"; \
-       } >> /etc/ssh/sshd_config
+# Tunnel-only accounts use /bin/false; Dropbear refuses shells not in /etc/shells
+RUN mkdir -p /etc/dropbear \
+    && (grep -qx '/bin/false' /etc/shells || echo '/bin/false' >> /etc/shells)
 
-COPY proxies/ssh/banner.txt /etc/ssh/banner.txt
-RUN echo "Banner /etc/ssh/banner.txt" >> /etc/ssh/sshd_config
-
+COPY proxies/ssh/banner.txt /etc/dropbear/banner.txt
 COPY proxies/ssh/nginx.conf /etc/nginx/nginx.conf
+COPY proxies/ssh/ws_bridge.py /opt/ws_bridge.py
 COPY proxies/ssh/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
