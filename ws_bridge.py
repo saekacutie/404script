@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""HTTP-Upgrade -> raw TCP bridge.
+"""HTTP-Upgrade handshake -> raw TCP bridge.
 
-Accepts the "GET ... Upgrade: websocket" request nginx forwards, answers
-101 Switching Protocols, then pipes raw bytes to the SSH server (Dropbear).
+Clients (HTTP Injector / NPV Tunnel style) send "GET <path> HTTP/1.1" with
+"Upgrade: websocket". We answer 101 Switching Protocols, then pipe raw bytes
+to the target. Bytes the client sends right after its headers are kept.
+
+Environment:
+  BRIDGE_LISTEN_PORT  port to listen on (127.0.0.1)
+  BRIDGE_TARGET_HOST  upstream host
+  BRIDGE_TARGET_PORT  upstream port
 """
 import asyncio
 import base64
 import hashlib
 import os
 import socket
+import sys
 
-LISTEN_HOST = os.environ.get("WS_LISTEN_HOST", "127.0.0.1")
-LISTEN_PORT = int(os.environ.get("WS_LISTEN_PORT", "2222"))
-TARGET_HOST = os.environ.get("SSH_TARGET_HOST", "127.0.0.1")
-TARGET_PORT = int(os.environ.get("SSH_TARGET_PORT", "2200"))
+LISTEN_HOST = "127.0.0.1"
+LISTEN_PORT = int(os.environ["BRIDGE_LISTEN_PORT"])
+TARGET_HOST = os.environ["BRIDGE_TARGET_HOST"]
+TARGET_PORT = int(os.environ["BRIDGE_TARGET_PORT"])
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 BUF = 65536
@@ -24,6 +31,10 @@ HTTP_OK = (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
            b"Content-Length: 2\r\nConnection: close\r\n\r\nOK")
 HTTP_BAD_GATEWAY = (b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n"
                     b"Connection: close\r\n\r\n")
+
+
+def log(msg):
+    print("[bridge] " + msg, file=sys.stderr, flush=True)
 
 
 def tune(writer):
@@ -38,8 +49,7 @@ def tune(writer):
 
 def parse_headers(head):
     headers = {}
-    lines = head.decode("latin-1").split("\r\n")
-    for line in lines[1:]:
+    for line in head.decode("latin-1").split("\r\n")[1:]:
         if ":" in line:
             key, value = line.split(":", 1)
             headers[key.strip().lower()] = value.strip()
@@ -94,7 +104,8 @@ async def handle(creader, cwriter):
             ureader, uwriter = await asyncio.wait_for(
                 asyncio.open_connection(TARGET_HOST, TARGET_PORT),
                 timeout=CONNECT_TIMEOUT)
-        except (OSError, asyncio.TimeoutError):
+        except (OSError, asyncio.TimeoutError) as exc:
+            log("upstream %s:%s unreachable: %r" % (TARGET_HOST, TARGET_PORT, exc))
             cwriter.write(HTTP_BAD_GATEWAY)
             await cwriter.drain()
             return
@@ -125,6 +136,7 @@ async def handle(creader, cwriter):
 async def main():
     server = await asyncio.start_server(
         handle, LISTEN_HOST, LISTEN_PORT, limit=BUF, backlog=1024)
+    log("listening on %s:%s -> %s:%s" % (LISTEN_HOST, LISTEN_PORT, TARGET_HOST, TARGET_PORT))
     async with server:
         await server.serve_forever()
 
