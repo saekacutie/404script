@@ -58,9 +58,6 @@ PBKDF2_ITER = 200_000   # must match the auth script inside STARTUP
 PATH_RE = re.compile(r"^/[A-Za-z0-9._~/-]*$")
 XHTTP_MODES = {"auto", "packet-up", "stream-up", "stream-one"}
 
-# Non-interactive mode: set --auto on the command line, or DEPLOY_VM_AUTO=1
-# in the environment. Every prompt below then falls back to its default (or
-# to the matching DEPLOY_VM_* env var, if set) instead of asking.
 AUTO = "--auto" in sys.argv or os.environ.get("DEPLOY_VM_AUTO", "") == "1"
 
 def colour(text: str, code: str) -> str:
@@ -92,7 +89,6 @@ def gcloud_json(args: list[str]) -> dict | None:
         return None
 
 def _env_key(label: str) -> str:
-    # "GCE zone" -> "DEPLOY_VM_GCE_ZONE"
     return "DEPLOY_VM_" + re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_").upper()
 
 def ask(label: str, default: str | None = None, env_var: str | None = None) -> str:
@@ -115,7 +111,6 @@ def ask_yes_no(label: str, default: bool = True, env_var: str | None = None) -> 
     return default if not answer else answer.startswith("y")
 
 def ask_secret(label: str, env_var: str) -> str:
-    """Like getpass, but in --auto mode reads from env_var instead of prompting."""
     if AUTO:
         return os.environ.get(env_var, "")
     return getpass.getpass(f"  {label}: ").strip()
@@ -154,7 +149,6 @@ def firewall(project_id: str, name: str, protocol: str, port: int, tag: str, sou
          f"--source-ranges={sources}", f"--target-tags={tag}"])
 
 def hash_users(csv: str) -> str:
-    """'user:pass,user2:pass2' -> 'user:salt:pbkdf2hex,...' (no plaintext leaves this machine)."""
     out = []
     for pair in filter(None, (p.strip() for p in csv.split(","))):
         user, sep, password = pair.partition(":")
@@ -168,8 +162,6 @@ def hash_users(csv: str) -> str:
     return ",".join(out)
 
 def startup(config: dict) -> str:
-    # Values are shell-quoted before substitution. The generated script is
-    # also saved locally so a failed first boot is reproducible/auditable.
     q = lambda value: shlex.quote(str(value))
     values = {key: q(value) for key, value in config.items()}
     return STARTUP.replace("@@REALITY@@", values["reality"])\
@@ -219,7 +211,6 @@ def wait_ready(project_id: str, zone: str, name: str, timeout: int = 900) -> dic
     die(f"VM setup timed out; inspect with: gcloud compute ssh {name} --zone {zone} --tunnel-through-iap")
 
 def scp(project_id: str, zone: str, name: str, remote: str, local: Path) -> bool:
-    # /root is not readable by the SSH user, so stage a copy first.
     staged = "/tmp/client1.ovpn"
     prep = ssh(project_id, zone, name, f"sudo cp {remote} {staged} && sudo chmod 644 {staged}")
     if prep.returncode:
@@ -264,8 +255,6 @@ set -euo pipefail
 exec >> /var/log/vm-setup.log 2>&1
 export DEBIAN_FRONTEND=noninteractive
 
-# GCE re-runs startup scripts on every boot. Provisioning is one-shot:
-# re-running easyrsa init-pki would fail (or wipe the PKI).
 if [ -f /etc/vm-setup-complete.json ]; then
   echo "=== Already provisioned; skipping (delete the VM for a clean rebuild) ==="
   exit 0
@@ -286,16 +275,12 @@ USERS=@@USERS@@
 IFACE=$(ip route | awk '/default/ {print $5; exit}')
 IP=$(curl -sf -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip)
 
-# Remove any legacy/incompatible Xray config before it starts
 rm -f /etc/xray/config.json /usr/local/etc/xray/config.json
 mkdir -p /usr/local/etc/xray
 
 REALITY_JSON='{"enabled":false}'; OVPN_JSON='{"enabled":false}'; SSH_JSON='{"enabled":false}'
 AUTH_ON=false
 
-# VLESS + REALITY (xhttp or tcp/Vision) plus, for xhttp, an optional TLS relay
-# listener for the Cloud Run engine. Every critical step returns 1 on failure so
-# the VM still finishes provisioning (OpenVPN/SSH) and reports reality disabled.
 setup_reality() {
   echo "=== Installing Xray ==="
   curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s -- install || return 1
@@ -308,8 +293,6 @@ setup_reality() {
 
   UUID=$(cat /proc/sys/kernel/random/uuid)
   KEYS=$("$XRAY" x25519) || return 1
-  # Older Xray prints "Private key:" / "Public key:"; newer prints
-  # "PrivateKey:" / "Password:" where "Password" is the public key.
   PRIVATE=$(printf '%s\n' "$KEYS" | awk -F': *' 'tolower($1) ~ /^private ?key$/ {print $2; exit}')
   PUBLIC=$(printf '%s\n' "$KEYS" | awk -F': *' 'tolower($1) ~ /^(public ?key|password)$/ {print $2; exit}')
   if [ -z "$PRIVATE" ] || [ -z "$PUBLIC" ]; then
@@ -356,7 +339,6 @@ if transport == "xhttp":
     stream["network"] = "xhttp"
     stream["xhttpSettings"] = {"path": e["XPATH"], "mode": e["XMODE"]}
 else:
-    # Vision flow only exists on raw TCP; XHTTP must not set a flow.
     stream["network"] = "tcp"
     client["flow"] = "xtls-rprx-vision"
 
@@ -455,7 +437,7 @@ if [ "$OVPN" = true ]; then
   apt-get install -y openvpn easy-rsa iptables-persistent
 
   EZ=/etc/openvpn/easy-rsa; mkdir -p "$EZ"; cp -r /usr/share/easy-rsa/* "$EZ"/; cd "$EZ"
-  ./easyrsa init-pki
+  ./easyrsa --batch init-pki
   ./easyrsa --batch build-ca nopass
   ./easyrsa --batch gen-req server nopass
   ./easyrsa --batch sign-req server server
@@ -464,7 +446,6 @@ if [ "$OVPN" = true ]; then
   openvpn --genkey tls-crypt "$EZ/tc.key"
 
   mkdir -p /etc/openvpn/server
-  # dh none = ECDH only: no slow gen-dh on a small VM, supported by OpenVPN 2.4+.
   cat > /etc/openvpn/server/server.conf <<EOF
 port $OPORT
 proto $OPROTO
@@ -495,8 +476,6 @@ EOF
 
     cat > /etc/openvpn/auth.py <<'AUTHEOF'
 #!/usr/bin/python3
-# OpenVPN auth-user-pass-verify (via-file): line 1 = username, line 2 = password.
-# users.hash lines: user:salt_hex:pbkdf2_sha256_hex  (200000 iterations)
 import hashlib, hmac, sys
 try:
     with open(sys.argv[1]) as f:
@@ -527,8 +506,6 @@ EOF
     AUTH_ON=true
   fi
 
-  # Debian's openvpn-server@ unit sets LimitNPROC=10, which starves the
-  # auth script (it is forked per login attempt).
   mkdir -p /etc/systemd/system/openvpn-server@server.service.d
   cat > /etc/systemd/system/openvpn-server@server.service.d/override.conf <<EOF
 [Service]
@@ -599,7 +576,6 @@ EOF
   SSH_JSON='{"enabled":true,"user":"tunnel","port":22}'
 fi
 
-# Write completion marker
 jq -n \
   --argjson reality "$REALITY_JSON" \
   --argjson openvpn "$OVPN_JSON" \
@@ -739,8 +715,6 @@ def main() -> None:
     host = fqdn or ip
     print(colour(f"\nVM ready: {host} (static IP {ip})", GREEN))
 
-    # Written so deploy.sh's SSH Gateway (7) / OVPN Relay (8) / Reality Combo (9)
-    # options can pick up the host/port/keys automatically instead of asking.
     info_path = WORKDIR / f"{name}-info.json"
     info_path.write_text(json.dumps({
         "vm_name": name,
@@ -777,21 +751,16 @@ def main() -> None:
             local_ovpn.chmod(0o600)
             print(f"OpenVPN profile: {local_ovpn}")
             if result.get("openvpn", {}).get("auth"):
-                print("  Clients are asked for a username/password on connect (your logins above).")
-            if oproto == "udp":
-                print(colour("  Note: proto udp - the Cloud Run relay (/saeka-ovpn) needs tcp.", YELLOW))
-            print("  deploy.sh can embed this file and serve it at https://<run.app>/cert")
-        else:
-            print(colour("  Could not copy the .ovpn profile from the VM.", YELLOW))
+                print("  Clients are asked for a username and password in addition to the client certificate.")
+            else:
+                print("  Certificate-only authentication (no password required).")
 
     if ssh_tunnel:
-        print(f"SSH SOCKS: ssh -i {key_path} -D 1080 -N tunnel@{host}")
+        print(f"SSH SOCKS tunnel key: {key_path}")
+        print(f"  Connect: ssh -i {key_path} -D 1080 -N tunnel@{host}")
 
-    print(colour("\nCloud Run remains the HTTP endpoint; use the VM host for TCP/UDP protocols.", YELLOW))
+    print(colour("\n=== Deployment finished successfully ===", GREEN))
+
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nAborted.")
-        raise SystemExit(130)
+    main()
