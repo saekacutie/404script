@@ -1,7 +1,6 @@
 # docker build -f proxies/ssh/Dockerfile -t IMAGE .
-# SSH-over-WebSocket gateway:
-#   nginx :8080 -> ws_bridge.py :2222 -> Dropbear :2200 (user/password)
-#   badvpn-udpgw :7300 (UDP over the SSH tunnel, reached via SSH port-forward)
+# nginx :8080 -> ws_bridge :2222 -> Dropbear :2200 (user/password)
+# badvpn-udpgw :7300 carries UDP through the SSH tunnel.
 FROM debian:bookworm-slim
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -16,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get autoremove -y \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Tunnel-only accounts use /bin/false; Dropbear refuses shells not in /etc/shells
+# Tunnel-only accounts use /bin/false; Dropbear refuses shells missing from /etc/shells.
 RUN mkdir -p /etc/dropbear \
     && (grep -qx '/bin/false' /etc/shells || echo '/bin/false' >> /etc/shells)
 
