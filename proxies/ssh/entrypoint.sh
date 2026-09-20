@@ -1,28 +1,48 @@
 #!/bin/bash
 set -euo pipefail
+ulimit -n 65535 2>/dev/null || true
 
-SSH_USER="${SSH_USER:-saeka}"
-SSH_PASS="${SSH_PASS:-}"
 UDPGW_PORT="${UDPGW_PORT:-7300}"
+SSH_USERS="${SSH_USERS:-}"   # "user1:pass1,user2:pass2"
 
-if [ -z "$SSH_PASS" ]; then
-    echo "ERROR: set the SSH_PASS environment variable" >&2
+# No users supplied: create one random account and print it to the logs
+if [ -z "$SSH_USERS" ]; then
+    gen_pass="$(python3 -c 'import secrets,string; a=string.ascii_letters+string.digits; print("".join(secrets.choice(a) for _ in range(16)))')"
+    SSH_USERS="saeka:${gen_pass}"
+    echo "[!] SSH_USERS not set - generated one-off account  saeka / ${gen_pass}"
+fi
+
+created=0
+IFS=',' read -r -a entries <<< "$SSH_USERS"
+for entry in "${entries[@]}"; do
+    name="${entry%%:*}"
+    pass="${entry#*:}"
+    if [ "$name" = "$entry" ] || [ -z "$pass" ] || ! [[ "$name" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        echo "[!] skipping invalid SSH_USERS entry (expected name:password, name = a-z 0-9 _ -)" >&2
+        continue
+    fi
+    uid="$(id -u "$name" 2>/dev/null || true)"
+    if [ -n "$uid" ] && [ "$uid" -lt 1000 ]; then
+        echo "[!] skipping '$name': system account" >&2
+        continue
+    fi
+    if [ -z "$uid" ]; then
+        useradd -m -s /bin/false "$name"
+    fi
+    printf '%s:%s\n' "$name" "$pass" | chpasswd
+    created=$((created + 1))
+    echo "[+] user ready: ${name}"
+done
+if [ "$created" -eq 0 ]; then
+    echo "[!] no valid users - refusing to start" >&2
     exit 1
 fi
 
-case "$SSH_USER" in
-    ""|[0-9-]*|*[!a-z0-9_-]*)
-        echo "ERROR: SSH_USER must be lowercase letters, digits, _ or -, and not start with a digit or -" >&2
-        exit 1
-        ;;
-esac
-
-if ! id "$SSH_USER" >/dev/null 2>&1; then
-    useradd -m -s /bin/false "$SSH_USER"
-fi
-printf '%s:%s\n' "$SSH_USER" "$SSH_PASS" | chpasswd
-
+# Host keys (RSA + ECDSA + ED25519 so old and new clients can all connect)
 mkdir -p /etc/dropbear
+[ -s /etc/dropbear/dropbear_rsa_host_key ]     || dropbearkey -t rsa -s 2048 -f /etc/dropbear/dropbear_rsa_host_key >/dev/null
+[ -s /etc/dropbear/dropbear_ecdsa_host_key ]   || dropbearkey -t ecdsa -s 256 -f /etc/dropbear/dropbear_ecdsa_host_key >/dev/null
+[ -s /etc/dropbear/dropbear_ed25519_host_key ] || dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null
 
 pids=()
 cleanup() {
@@ -41,21 +61,24 @@ badvpn-udpgw \
     --loglevel 2 &
 pids+=($!)
 
-# SSH server (Dropbear): password auth, no root login, no remote forwarding
-dropbear -F -E -R -w -k -m \
+# SSH server: password login, no root, no remote forwarding
+dropbear -F -E -w -k -m \
     -p 127.0.0.1:2200 \
+    -r /etc/dropbear/dropbear_rsa_host_key \
+    -r /etc/dropbear/dropbear_ecdsa_host_key \
+    -r /etc/dropbear/dropbear_ed25519_host_key \
     -K 30 -W 65536 \
     -b /etc/dropbear/banner.txt &
 pids+=($!)
 
-# WebSocket/Upgrade -> raw TCP bridge
-python3 /opt/ws_bridge.py &
+BRIDGE_LISTEN_PORT=2222 BRIDGE_TARGET_HOST=127.0.0.1 BRIDGE_TARGET_PORT=2200 \
+    python3 /opt/ws_bridge.py &
 pids+=($!)
 
 nginx -g 'daemon off;' &
 pids+=($!)
 
-# If any service dies, exit so the platform restarts the whole container
+# If any service dies, exit so Cloud Run starts a fresh instance
 wait -n || true
-echo "A service exited; shutting down." >&2
+echo "[!] a service exited - shutting down" >&2
 exit 1
