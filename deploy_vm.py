@@ -8,6 +8,12 @@ Requirements: Python 3, gcloud authenticated, and an active GCP project.
 Optional DNS: set CF_API_TOKEN and pass a domain when prompted. The token must
 only have Cloudflare Zone DNS Edit permission.
 
+VLESS+REALITY runs as XHTTP (default) or as raw TCP with the Vision flow. With
+XHTTP the VM can also open a second, TLS-protected listener (default tcp/8443,
+path /vless-saeka-xh, self-signed cert that deploy.sh pins). The Cloud Run
+"Reality Combo" engine (deploy.sh option 9) relays XHTTP to that listener, so
+one UUID works directly over REALITY and through Cloud Run.
+
 OpenVPN logins: the same "user:pass,user2:pass2" list you give deploy.sh
 (export SSH_USERS first to share it between both). Only PBKDF2 hashes are sent
 to the VM. Clients then need BOTH the client certificate (inside the .ovpn) and
@@ -17,11 +23,14 @@ NOTE: the Cloud Run relay (/saeka-ovpn) needs OpenVPN on proto TCP.
 Non-interactive mode: pass --auto (or set DEPLOY_VM_AUTO=1) to skip every
 prompt. Text/number prompts use their default unless you set the matching
 DEPLOY_VM_<LABEL> env var (e.g. DEPLOY_VM_GCE_ZONE, DEPLOY_VM_VM_NAME,
-DEPLOY_VM_MACHINE_TYPE). The three protocol toggles use fixed names instead:
+DEPLOY_VM_MACHINE_TYPE). The protocol toggles use fixed names instead:
 DEPLOY_VM_ENABLE_REALITY, DEPLOY_VM_ENABLE_OVPN, DEPLOY_VM_ENABLE_SSH (each
-"y"/"n", default "y"). OpenVPN logins come from OVPN_USERS (or SSH_USERS,
-same as before) and the Cloudflare token still comes from CF_API_TOKEN. The
-external IP is always auto-reserved via gcloud - it was never typed by hand.
+"y"/"n", default "y"). REALITY extras: DEPLOY_VM_REALITY_TRANSPORT (xhttp|tcp),
+DEPLOY_VM_XHTTP_PATH, DEPLOY_VM_XHTTP_MODE, DEPLOY_VM_ENABLE_RELAY (y/n),
+DEPLOY_VM_RELAY_PORT, DEPLOY_VM_RELAY_PATH. OpenVPN logins come from OVPN_USERS
+(or SSH_USERS, same as before) and the Cloudflare token still comes from
+CF_API_TOKEN. The external IP is always auto-reserved via gcloud - it was never
+typed by hand.
 """
 from __future__ import annotations
 import getpass
@@ -35,6 +44,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -44,6 +54,9 @@ YELLOW = "\033[1;33m"
 
 WORKDIR = Path.home() / ".deploy_vm"
 PBKDF2_ITER = 200_000   # must match the auth script inside STARTUP
+
+PATH_RE = re.compile(r"^/[A-Za-z0-9._~/-]*$")
+XHTTP_MODES = {"auto", "packet-up", "stream-up", "stream-one"}
 
 # Non-interactive mode: set --auto on the command line, or DEPLOY_VM_AUTO=1
 # in the environment. Every prompt below then falls back to its default (or
@@ -107,6 +120,17 @@ def ask_secret(label: str, env_var: str) -> str:
         return os.environ.get(env_var, "")
     return getpass.getpass(f"  {label}: ").strip()
 
+def ask_port(label: str, default: int, env_var: str | None = None) -> int:
+    raw = ask(label, str(default), env_var)
+    if not raw.isdigit() or not 1 <= int(raw) <= 65535:
+        die(f"{label} must be a number from 1 to 65535")
+    return int(raw)
+
+def valid_path(label: str, value: str) -> str:
+    if not PATH_RE.fullmatch(value):
+        die(f"{label} must start with / and use only letters, digits and . _ ~ / -")
+    return value
+
 def project() -> str:
     value = cmd(["gcloud", "config", "get-value", "project"], capture=True).stdout.strip()
     if not value or value == "(unset)":
@@ -154,6 +178,12 @@ def startup(config: dict) -> str:
         .replace("@@RPORT@@", values["reality_port"])\
         .replace("@@DEST@@", values["reality_dest"])\
         .replace("@@SNI@@", values["reality_sni"])\
+        .replace("@@RTRANSPORT@@", values["reality_transport"])\
+        .replace("@@XPATH@@", values["xhttp_path"])\
+        .replace("@@XMODE@@", values["xhttp_mode"])\
+        .replace("@@RELAYPORT@@", values["relay_port"])\
+        .replace("@@RELAYPATH@@", values["relay_path"])\
+        .replace("@@RELAY@@", values["relay"])\
         .replace("@@OPORT@@", values["ovpn_port"])\
         .replace("@@OPROTO@@", values["ovpn_proto"])\
         .replace("@@PUBKEY@@", values["pubkey"])\
@@ -248,6 +278,8 @@ apt-get install -y curl unzip ca-certificates openssl jq python3
 
 REALITY=@@REALITY@@; OVPN=@@OVPN@@; SSH_TUNNEL=@@SSH@@
 RPORT=@@RPORT@@; DEST=@@DEST@@; SNI=@@SNI@@
+RTRANSPORT=@@RTRANSPORT@@; XPATH=@@XPATH@@; XMODE=@@XMODE@@
+RELAY=@@RELAY@@; RELAYPORT=@@RELAYPORT@@; RELAYPATH=@@RELAYPATH@@
 OPORT=@@OPORT@@; OPROTO=@@OPROTO@@; PUBKEY=@@PUBKEY@@
 USERS=@@USERS@@
 
@@ -261,69 +293,161 @@ mkdir -p /usr/local/etc/xray
 REALITY_JSON='{"enabled":false}'; OVPN_JSON='{"enabled":false}'; SSH_JSON='{"enabled":false}'
 AUTH_ON=false
 
-if [ "$REALITY" = true ]; then
-  echo "=== Installing Xray + VLESS+REALITY ==="
-  curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s -- install
+# VLESS + REALITY (xhttp or tcp/Vision) plus, for xhttp, an optional TLS relay
+# listener for the Cloud Run engine. Every critical step returns 1 on failure so
+# the VM still finishes provisioning (OpenVPN/SSH) and reports reality disabled.
+setup_reality() {
+  echo "=== Installing Xray ==="
+  curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s -- install || return 1
+
+  XRAY=/usr/local/bin/xray
+  XDIR=/usr/local/etc/xray
+  RELAY_CRT=""; RELAY_KEY=""
+  mkdir -p "$XDIR"
+  echo "Xray version: $("$XRAY" version 2>&1 | head -n1 || true)"
 
   UUID=$(cat /proc/sys/kernel/random/uuid)
-  KEYS=$(/usr/local/bin/xray x25519)
-  PRIVATE=$(echo "$KEYS" | awk -F': ' '/Private key/{print $2}')
-  PUBLIC=$(echo "$KEYS" | awk -F': ' '/Public key/{print $2}')
+  KEYS=$("$XRAY" x25519) || return 1
+  # Older Xray prints "Private key:" / "Public key:"; newer prints
+  # "PrivateKey:" / "Password:" where "Password" is the public key.
+  PRIVATE=$(printf '%s\n' "$KEYS" | awk -F': *' 'tolower($1) ~ /^private ?key$/ {print $2; exit}')
+  PUBLIC=$(printf '%s\n' "$KEYS" | awk -F': *' 'tolower($1) ~ /^(public ?key|password)$/ {print $2; exit}')
+  if [ -z "$PRIVATE" ] || [ -z "$PUBLIC" ]; then
+    echo "ERROR: could not parse the output of 'xray x25519':"
+    echo "$KEYS"
+    return 1
+  fi
   SID=$(openssl rand -hex 8)
 
-  jq -n \
-    --arg uuid "$UUID" \
-    --arg private "$PRIVATE" \
-    --arg dest "$DEST" \
-    --arg sni "$SNI" \
-    --arg sid "$SID" \
-    --argjson port "$RPORT" \
-    '{
-      log: {loglevel: "warning"},
-      inbounds: [{
-        listen: "0.0.0.0",
-        port: $port,
-        protocol: "vless",
-        settings: {
-          clients: [{id: $uuid, flow: "xtls-rprx-vision"}],
-          decryption: "none"
+  if [ "$RTRANSPORT" = xhttp ] && [ "$RELAY" = true ]; then
+    echo "=== Creating self-signed cert for the Cloud Run relay listener ==="
+    RELAY_CRT="$XDIR/relay.crt"; RELAY_KEY="$XDIR/relay.key"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+      -subj "/CN=vm-relay" -addext "subjectAltName=DNS:vm-relay" \
+      -keyout "$RELAY_KEY" -out "$RELAY_CRT" || return 1
+    XUSER=$(systemctl show -p User --value xray 2>/dev/null || true)
+    [ -n "$XUSER" ] || XUSER=root
+    chown "$XUSER" "$RELAY_KEY" "$RELAY_CRT"
+    chmod 600 "$RELAY_KEY"
+    chmod 644 "$RELAY_CRT"
+  else
+    RELAY=false
+  fi
+
+  export UUID PRIVATE PUBLIC SID DEST SNI RPORT RTRANSPORT XPATH XMODE RELAY RELAYPORT RELAYPATH RELAY_CRT RELAY_KEY
+
+  python3 - <<'PYEOF' > "$XDIR/config.json" || return 1
+import json, os
+
+e = os.environ
+transport = e["RTRANSPORT"]
+
+reality = {
+    "show": False,
+    "dest": e["DEST"],
+    "xver": 0,
+    "serverNames": [e["SNI"]],
+    "privateKey": e["PRIVATE"],
+    "shortIds": [e["SID"]],
+}
+stream = {"security": "reality", "realitySettings": reality}
+client = {"id": e["UUID"]}
+if transport == "xhttp":
+    stream["network"] = "xhttp"
+    stream["xhttpSettings"] = {"path": e["XPATH"], "mode": e["XMODE"]}
+else:
+    # Vision flow only exists on raw TCP; XHTTP must not set a flow.
+    stream["network"] = "tcp"
+    client["flow"] = "xtls-rprx-vision"
+
+inbounds = [{
+    "tag": "reality-in",
+    "listen": "0.0.0.0",
+    "port": int(e["RPORT"]),
+    "protocol": "vless",
+    "settings": {"clients": [client], "decryption": "none"},
+    "streamSettings": stream,
+}]
+
+if e["RELAY"] == "true":
+    inbounds.append({
+        "tag": "relay-in",
+        "listen": "0.0.0.0",
+        "port": int(e["RELAYPORT"]),
+        "protocol": "vless",
+        "settings": {"clients": [{"id": e["UUID"]}], "decryption": "none"},
+        "streamSettings": {
+            "network": "xhttp",
+            "xhttpSettings": {"path": e["RELAYPATH"], "mode": "auto"},
+            "security": "tls",
+            "tlsSettings": {
+                "alpn": ["h2", "http/1.1"],
+                "certificates": [{"certificateFile": e["RELAY_CRT"], "keyFile": e["RELAY_KEY"]}],
+            },
         },
-        streamSettings: {
-          network: "tcp",
-          security: "reality",
-          realitySettings: {
-            show: false,
-            dest: $dest,
-            xver: 0,
-            serverNames: [$sni],
-            privateKey: $private,
-            shortIds: [$sid]
-          }
-        }
-      }],
-      outbounds: [{protocol: "freedom"}]
-    }' > /usr/local/etc/xray/config.json
+    })
+
+config = {
+    "log": {"loglevel": "warning"},
+    "inbounds": inbounds,
+    "outbounds": [{"protocol": "freedom", "tag": "direct"}],
+}
+print(json.dumps(config, indent=2))
+PYEOF
 
   mkdir -p /etc/xray
-  ln -sf /usr/local/etc/xray/config.json /etc/xray/config.json
+  ln -sf "$XDIR/config.json" /etc/xray/config.json
 
-  systemctl enable --now xray
+  if ! "$XRAY" run -test -config "$XDIR/config.json"; then
+    echo "ERROR: xray rejected the generated config"
+    return 1
+  fi
+
+  systemctl enable xray
+  systemctl restart xray
   sleep 2
 
-  if systemctl is-active --quiet xray; then
-    echo "Xray+REALITY started successfully"
-    REALITY_JSON=$(jq -n \
-      --arg uuid "$UUID" \
-      --arg pbk "$PUBLIC" \
-      --arg sid "$SID" \
-      --arg sni "$SNI" \
-      --arg dest "$DEST" \
-      --argjson port "$RPORT" \
-      '{enabled:true,uuid:$uuid,publicKey:$pbk,shortId:$sid,serverName:$sni,dest:$dest,port:$port}')
-  else
+  if ! systemctl is-active --quiet xray; then
     echo "WARNING: Xray service failed to start"
     systemctl status xray --no-pager || true
+    journalctl -u xray --no-pager -n 30 || true
+    return 1
   fi
+
+  echo "Xray+REALITY started successfully"
+  REALITY_JSON=$(python3 - <<'PYEOF'
+import base64, json, os
+
+e = os.environ
+out = {
+    "enabled": True,
+    "transport": e["RTRANSPORT"],
+    "uuid": e["UUID"],
+    "publicKey": e["PUBLIC"],
+    "shortId": e["SID"],
+    "serverName": e["SNI"],
+    "dest": e["DEST"],
+    "port": int(e["RPORT"]),
+    "path": e["XPATH"],
+    "mode": e["XMODE"],
+    "relay": {"enabled": False},
+}
+if e["RELAY"] == "true":
+    with open(e["RELAY_CRT"], "rb") as f:
+        cert = base64.b64encode(f.read()).decode()
+    out["relay"] = {
+        "enabled": True,
+        "port": int(e["RELAYPORT"]),
+        "path": e["RELAYPATH"],
+        "certB64": cert,
+    }
+print(json.dumps(out))
+PYEOF
+)
+}
+
+if [ "$REALITY" = true ]; then
+  setup_reality || echo "WARNING: REALITY setup failed - see /var/log/vm-setup.log"
 fi
 
 if [ "$OVPN" = true ]; then
@@ -505,11 +629,37 @@ def main() -> None:
     if not (reality or ovpn or ssh_tunnel):
         die("select at least one protocol")
 
-    rport = int(ask("REALITY port", "443")) if reality else 443
+    rport = ask_port("REALITY port", 443) if reality else 443
     sni = ask("REALITY server name", "www.microsoft.com") if reality else "www.microsoft.com"
     dest = ask("REALITY destination host:port", f"{sni}:443") if reality else f"{sni}:443"
 
-    oport = int(ask("OpenVPN port", "1194")) if ovpn else 1194
+    rtransport = "xhttp"
+    xpath = "/xh-saeka"
+    xmode = "auto"
+    relay = False
+    relay_port = 8443
+    relay_path = "/vless-saeka-xh"
+    if reality:
+        rtransport = ask("REALITY transport (xhttp or tcp)", "xhttp",
+                         env_var="DEPLOY_VM_REALITY_TRANSPORT").lower()
+        if rtransport not in {"xhttp", "tcp"}:
+            die("REALITY transport must be xhttp or tcp")
+        if rtransport == "xhttp":
+            xpath = valid_path("XHTTP path", ask("XHTTP path", "/xh-saeka", env_var="DEPLOY_VM_XHTTP_PATH"))
+            xmode = ask("XHTTP mode (auto/packet-up/stream-up/stream-one)", "auto",
+                        env_var="DEPLOY_VM_XHTTP_MODE").lower()
+            if xmode not in XHTTP_MODES:
+                die("XHTTP mode must be auto, packet-up, stream-up or stream-one")
+            relay = ask_yes_no("Also open a TLS relay listener for the Cloud Run XHTTP relay?", True,
+                               env_var="DEPLOY_VM_ENABLE_RELAY")
+            if relay:
+                relay_port = ask_port("Relay listener port", 8443, "DEPLOY_VM_RELAY_PORT")
+                relay_path = valid_path("Relay path", ask("Relay path", "/vless-saeka-xh",
+                                                          env_var="DEPLOY_VM_RELAY_PATH"))
+                if relay_port in {rport, 22}:
+                    die(f"relay port {relay_port} clashes with the REALITY port or SSH")
+
+    oport = ask_port("OpenVPN port", 1194) if ovpn else 1194
     oproto = "udp"
     users_hash = ""
     if ovpn:
@@ -517,6 +667,8 @@ def main() -> None:
                      env_var="DEPLOY_VM_OVPN_PROTO").lower()
         if oproto not in {"udp", "tcp"}:
             die("OpenVPN protocol must be udp or tcp")
+        if oproto == "tcp" and reality and oport in {rport, relay_port if relay else 0}:
+            die(f"OpenVPN port {oport}/tcp clashes with a REALITY/relay port")
         raw_users = os.environ.get("SSH_USERS", "")
         if raw_users:
             print(colour("  Using logins from the SSH_USERS environment variable.", YELLOW))
@@ -537,6 +689,8 @@ def main() -> None:
 
     if reality:
         firewall(project_id, f"{tag}-reality", "tcp", rport, tag)
+        if relay:
+            firewall(project_id, f"{tag}-relay", "tcp", relay_port, tag)
     if ovpn:
         firewall(project_id, f"{tag}-openvpn", oproto, oport, tag)
     firewall(project_id, f"{tag}-iap", "tcp", 22, tag, "35.235.240.0/20")
@@ -548,6 +702,12 @@ def main() -> None:
         "reality_port": rport,
         "reality_dest": dest,
         "reality_sni": sni,
+        "reality_transport": rtransport,
+        "xhttp_path": xpath,
+        "xhttp_mode": xmode,
+        "relay": str(relay).lower(),
+        "relay_port": relay_port,
+        "relay_path": relay_path,
         "ovpn_port": oport,
         "ovpn_proto": oproto,
         "pubkey": pubkey,
@@ -561,6 +721,13 @@ def main() -> None:
     create_vm(project_id, zone, name, machine, ip, tag, script_path)
     result = wait_ready(project_id, zone, name)
 
+    reality_info = result.get("reality", {"enabled": False})
+    if reality and not reality_info.get("enabled"):
+        print(colour("  REALITY did not come up; see /var/log/vm-setup.log on the VM.", YELLOW))
+    elif reality and reality_info.get("transport") != rtransport:
+        print(colour(f"  This VM was built earlier with transport '{reality_info.get('transport', 'tcp')}', "
+                     f"not '{rtransport}'. Delete the VM for a clean rebuild.", YELLOW))
+
     domain = ask("DNS domain for VM sibling record (blank to skip)", "")
     fqdn = None
     if domain:
@@ -572,24 +739,37 @@ def main() -> None:
     host = fqdn or ip
     print(colour(f"\nVM ready: {host} (static IP {ip})", GREEN))
 
-    # Written so deploy.sh's SSH Gateway (7) / OVPN Relay (8) options can pick
-    # up the host/port automatically instead of asking you to type them.
+    # Written so deploy.sh's SSH Gateway (7) / OVPN Relay (8) / Reality Combo (9)
+    # options can pick up the host/port/keys automatically instead of asking.
     info_path = WORKDIR / f"{name}-info.json"
     info_path.write_text(json.dumps({
         "vm_name": name,
         "host": host,
         "ip": ip,
+        "zone": zone,
         "ovpn_enabled": bool(ovpn),
         "ovpn_port": oport if ovpn else None,
         "ovpn_proto": oproto if ovpn else None,
         "ssh_tunnel_enabled": bool(ssh_tunnel),
+        "reality": reality_info,
         "updated": time.time(),
     }, indent=2))
     info_path.chmod(0o600)
 
-    if result.get("reality", {}).get("enabled"):
-        r = result["reality"]
-        print(f"REALITY: vless://{r['uuid']}@{host}:{r['port']}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={r['serverName']}&fp=chrome&pbk={r['publicKey']}&sid={r['shortId']}&type=tcp#saeka-reality")
+    if reality_info.get("enabled"):
+        r = reality_info
+        if r.get("transport") == "xhttp":
+            enc_path = urllib.parse.quote(r["path"], safe="")
+            print(f"REALITY (XHTTP): vless://{r['uuid']}@{host}:{r['port']}?encryption=none&security=reality"
+                  f"&sni={r['serverName']}&fp=chrome&pbk={r['publicKey']}&sid={r['shortId']}"
+                  f"&type=xhttp&path={enc_path}&mode={r['mode']}#saeka-reality-xhttp")
+            if r.get("relay", {}).get("enabled"):
+                print(f"  Cloud Run relay listener: tcp/{r['relay']['port']} path {r['relay']['path']} "
+                      f"(deploy.sh option 9 wires it up)")
+        else:
+            print(f"REALITY: vless://{r['uuid']}@{host}:{r['port']}?encryption=none&flow=xtls-rprx-vision"
+                  f"&security=reality&sni={r['serverName']}&fp=chrome&pbk={r['publicKey']}&sid={r['shortId']}"
+                  f"&type=tcp#saeka-reality")
 
     if ovpn:
         local_ovpn = WORKDIR / f"{name}-client1.ovpn"
