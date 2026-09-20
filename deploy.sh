@@ -385,8 +385,7 @@ echo -e "  ${YELLOW}------------------------------------------------------------
 if [ "$PROXY_ENV" == "ssh" ]; then
     echo -e "  ${CYAN}                  SSH GATEWAY${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
-    echo -e "  ${GREEN}Path: /saeka-ssh${RESET}  (fake-handshake WS, not real RFC6455 -"
-    echo -e "  matches HTTP Injector / NPV Tunnel style clients)"
+    echo -e "  ${GREEN}Path: /saeka-ssh${RESET}  (experimental protocol)"
     if [ -n "$SSH_USERS_CSV" ]; then
         echo -e "  ${CYAN}Users configured: ${GREEN}$(echo "$SSH_USERS_CSV" | tr ',' '\n' | cut -d: -f1 | paste -sd, -)${RESET}"
     else
