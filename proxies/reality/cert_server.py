@@ -1,87 +1,85 @@
 #!/usr/bin/env python3
-"""Serves the OpenVPN client profile at /cert behind HTTP Basic Auth."""
-import argparse
+"""Serves the OpenVPN client profile at /cert behind HTTP Basic auth.
+
+Logins are the same user:pass list the SSH gateway uses (SSH_USERS). The
+profile comes from OVPN_PROFILE_B64. Without both, /cert answers 503 and never
+serves anything. nginx proxies /cert here; this listens on 127.0.0.1 only.
+"""
 import base64
+import binascii
+import hmac
 import os
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Optional
+
+PORT = int(os.environ.get("CERT_PORT", "2224"))
 
 
-def load_users() -> dict:
+def load_users(raw):
     users = {}
-    for pair in os.environ.get("SSH_USERS", "").split(","):
-        pair = pair.strip()
-        if not pair or ":" not in pair:
-            continue
-        uname, pw = pair.split(":", 1)
-        users[uname] = pw
+    for entry in raw.split(","):
+        name, sep, password = entry.partition(":")
+        if sep and name and password:
+            users[name] = password
     return users
 
 
-def load_profile() -> Optional[bytes]:
-    b64 = os.environ.get("OVPN_PROFILE_B64", "")
-    if not b64:
-        return None
+USERS = load_users(os.environ.get("SSH_USERS", ""))
+try:
+    PROFILE = base64.b64decode(os.environ.get("OVPN_PROFILE_B64", ""), validate=True)
+except (binascii.Error, ValueError):
+    PROFILE = b""
+
+
+def authorised(header):
+    if not header.startswith("Basic "):
+        return False
     try:
-        return base64.b64decode(b64)
+        user, _, password = base64.b64decode(header[6:]).decode().partition(":")
     except Exception:
-        return None
-
-
-USERS = load_users()
-PROFILE = load_profile()
+        return False
+    expected = USERS.get(user)
+    # Always run one comparison so response time doesn't reveal which names exist.
+    same = hmac.compare_digest((expected or "x" * 16).encode(), password.encode())
+    return same and expected is not None
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "cert_server/1.0"
+    server_version = "gateway"
+    sys_version = ""
 
-    def log_message(self, fmt, *args):
+    def log_message(self, *args):
         pass
 
-    def _unauthorized(self):
-        self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="cert"')
+    def reply(self, code, body=b"", extra=None):
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
         self.end_headers()
-
-    def _check_auth(self) -> bool:
-        header = self.headers.get("Authorization", "")
-        if not header.startswith("Basic "):
-            return False
-        try:
-            decoded = base64.b64decode(header[6:]).decode("utf-8", "replace")
-            uname, _, pw = decoded.partition(":")
-        except Exception:
-            return False
-        return uname in USERS and USERS[uname] == pw
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def do_GET(self):
-        if self.path.rstrip("/") != "/cert":
-            self.send_response(404)
-            self.end_headers()
-            return
-        if not USERS or not self._check_auth():
-            self._unauthorized()
-            return
-        if PROFILE is None:
-            self.send_response(503)
-            self.end_headers()
-            self.wfile.write(b"no profile configured")
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "application/x-openvpn-profile")
-        self.send_header("Content-Disposition", 'attachment; filename="client1.ovpn"')
-        self.send_header("Content-Length", str(len(PROFILE)))
-        self.end_headers()
-        self.wfile.write(PROFILE)
+        if self.path.split("?", 1)[0] != "/cert":
+            self.reply(404, b"not found", {"Content-Type": "text/plain"})
+        elif not PROFILE or not USERS:
+            self.reply(503, b"profile not configured", {"Content-Type": "text/plain"})
+        elif not authorised(self.headers.get("Authorization", "")):
+            time.sleep(1)
+            self.reply(401, b"login required", {
+                "Content-Type": "text/plain",
+                "WWW-Authenticate": 'Basic realm="ovpn profile"',
+            })
+        else:
+            self.reply(200, PROFILE, {
+                "Content-Type": "application/x-openvpn-profile",
+                "Content-Disposition": 'attachment; filename="saeka.ovpn"',
+            })
 
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--listen", required=True, help="host:port to listen on")
-    args = parser.parse_args()
-    host, port = args.listen.rsplit(":", 1)
-    ThreadingHTTPServer((host, int(port)), Handler).serve_forever()
+    do_HEAD = do_GET
 
 
 if __name__ == "__main__":
-    main()
+    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
