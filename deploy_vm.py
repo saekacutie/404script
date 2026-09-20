@@ -170,7 +170,7 @@ def create_vm(project_id: str, zone: str, name: str, machine: str, ip: str, tag:
 
 def ssh(project_id: str, zone: str, name: str, remote: str) -> subprocess.CompletedProcess[str]:
     return cmd(["gcloud", "compute", "ssh", name, "--project", project_id, "--zone", zone,
-                "--tunnel-through-iap", "--command", remote], capture=True, check=False)
+                "--tunnel-through-iap", "--quiet", "--command", remote], capture=True, check=False)
 
 def wait_ready(project_id: str, zone: str, name: str, timeout: int = 900) -> dict:
     end = time.time() + timeout
@@ -195,7 +195,7 @@ def scp(project_id: str, zone: str, name: str, remote: str, local: Path) -> bool
     if prep.returncode:
         return False
     result = cmd(["gcloud", "compute", "scp", f"{name}:{staged}", str(local),
-                  "--project", project_id, "--zone", zone, "--tunnel-through-iap"], check=False)
+                  "--project", project_id, "--zone", zone, "--tunnel-through-iap", "--quiet"], check=False)
     ssh(project_id, zone, name, f"rm -f {staged}")
     return result.returncode == 0
 
