@@ -30,8 +30,8 @@ RUN mkdir -p /var/run/sshd \
         echo "Compression no"; \
        } >> /etc/ssh/sshd_config
 
-COPY proxies/ssh/banner.txt /etc/ssh/banner.txt
-RUN echo "Banner /etc/ssh/banner.txt" >> /etc/ssh/sshd_config
+COPY proxies/ssh/banner.html /etc/ssh/banner.html
+RUN echo "Banner /etc/ssh/banner.html" >> /etc/ssh/sshd_config
 
 COPY proxies/ssh/nginx.conf /etc/nginx/nginx.conf
 COPY proxies/ssh/entrypoint.sh /entrypoint.sh
