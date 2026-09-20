@@ -7,7 +7,7 @@ FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        openssh-server python3 cmake build-essential git ca-certificates \
+        openssh-server nginx python3 cmake build-essential git ca-certificates \
     && git clone --depth 1 https://github.com/ambrop72/badvpn.git /tmp/badvpn \
     && cd /tmp/badvpn && mkdir build && cd build \
     && cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 \
@@ -24,8 +24,8 @@ RUN mkdir -p /var/run/sshd \
         echo "UseDNS no"; \
         echo "TCPKeepAlive yes"; \
         echo "ClientAliveInterval 15"; \
-        echo "ClientAliveCountMax 5"; \
-        echo "MaxSessions 100"; \
+        echo "ClientAliveCountMax 3"; \
+        echo "MaxSessions 50"; \
         echo "MaxStartups 50:30:100"; \
         echo "Compression no"; \
        } >> /etc/ssh/sshd_config
@@ -33,8 +33,7 @@ RUN mkdir -p /var/run/sshd \
 COPY proxies/ssh/banner.txt /etc/ssh/banner.txt
 RUN echo "Banner /etc/ssh/banner.txt" >> /etc/ssh/sshd_config
 
-# Nginx config copy removed here
-
+COPY proxies/ssh/nginx.conf /etc/nginx/nginx.conf
 COPY proxies/ssh/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
