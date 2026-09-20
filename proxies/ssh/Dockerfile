@@ -29,8 +29,8 @@ RUN mkdir -p /var/run/sshd \
         echo "UseDNS no"; \
         echo "TCPKeepAlive yes"; \
         echo "ClientAliveInterval 15"; \
-        echo "ClientAliveCountMax 3"; \
-        echo "MaxSessions 50"; \
+        echo "ClientAliveCountMax 5"; \
+        echo "MaxSessions 100"; \
         echo "MaxStartups 50:30:100"; \
         echo "Compression no"; \
        } >> /etc/ssh/sshd_config
