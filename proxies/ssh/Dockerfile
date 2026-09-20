@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get autoremove -y \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /var/run/sshd \
+RUN mkdir -p /var/run/sshd /usr/share/nginx/html \
     && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config \
     && sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config \
     && { \
@@ -30,8 +30,11 @@ RUN mkdir -p /var/run/sshd \
         echo "Compression no"; \
        } >> /etc/ssh/sshd_config
 
-COPY proxies/ssh/banner.html /etc/ssh/banner.html
-RUN echo "Banner /etc/ssh/banner.html" >> /etc/ssh/sshd_config
+# OpenSSH banners are terminal text, not HTML. Keep the text banner for SSH
+# clients and serve the HTML banner separately through nginx for browsers.
+COPY proxies/ssh/banner.txt /etc/ssh/banner.txt
+COPY proxies/ssh/banner.html /usr/share/nginx/html/banner.html
+RUN echo "Banner /etc/ssh/banner.txt" >> /etc/ssh/sshd_config
 
 COPY proxies/ssh/nginx.conf /etc/nginx/nginx.conf
 COPY proxies/ssh/entrypoint.sh /entrypoint.sh
