@@ -1,13 +1,6 @@
 #!/bin/bash
-# ==============================================================================
-# 4N1 FAST DEPLOYER v2 - PER-ENGINE EDITION
-# ENGINEERED BY SAEKA TOJIRP
-# ==============================================================================
-# Key change from v1: each proxy engine now lives in its own
-# proxies/<engine>/Dockerfile. Choosing HAProxy here builds ONLY HAProxy's
-# small Alpine image - Envoy, Caddy, H2O, Traefik and OpenResty are never
-# downloaded, compiled, or added to the image. That's what makes builds
-# fast now instead of the old single-Dockerfile-with-everything approach.
+# 4N1 FAST DEPLOYER v2 - engineered by Saeka Tojirp
+# Each engine builds from its own proxies/<engine>/Dockerfile.
 set -euo pipefail
 
 BOLD='\033[1m'; RESET='\033[0m'
@@ -17,14 +10,7 @@ YELLOW='\033[1;33m'; MAGENTA='\033[1;35m'; WHITE='\033[1;37m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# ------------------------------------------------------------------------
-# TERMINAL LAYOUT HELPERS
-# Everything below is used to render the access screen as a centered
-# "page" in the terminal: a bordered box, a random greeting drawn from a
-# 100-entry pool (10 openers x 10 closers), a short feature summary, and
-# a centered password prompt. Purely cosmetic - the auth logic itself is
-# unchanged from v1/v2.
-# ------------------------------------------------------------------------
+# Terminal layout helpers (cosmetic only).
 TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
 case "$TERM_WIDTH" in ''|*[!0-9]*) TERM_WIDTH=80;; esac
 [ "$TERM_WIDTH" -lt 40 ] && TERM_WIDTH=80
@@ -172,8 +158,8 @@ echo -e "  ${YELLOW}3) Caddy      - full protocol support incl. gRPC (fast & sta
 echo -e "  ${YELLOW}4) H2O        - full protocol support incl. gRPC${RESET}"
 echo -e "  ${YELLOW}5) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
 echo -e "  ${YELLOW}6) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
-echo -e "  ${YELLOW}7) SSH        - standalone SSH-over-WS (+ UDPGW), not the VLESS/etc stack${RESET}"
-echo -e "  ${YELLOW}8) OVPN       - standalone WS relay to a REAL OpenVPN server on a VM${RESET}"
+echo -e "  ${YELLOW}7) SSH Gateway - standalone SSH-over-WS (+ UDPGW), not the VLESS/etc stack${RESET}"
+echo -e "  ${YELLOW}8) OVPN Relay  - standalone WS relay to a REAL OpenVPN server on a VM${RESET}"
 echo ""
 read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-8] (Default 1): ${RESET}")" ENGINE_CHOICE
 
@@ -221,6 +207,10 @@ if [ -f "./regions.sh" ]; then
     source ./regions.sh
 else
     echo -e "  ${RED}ERROR: regions.sh not found. Please ensure it is in the same directory.${RESET}"
+    exit 1
+fi
+if [ -z "${REGION:-}" ]; then
+    echo -e "  ${RED}ERROR: regions.sh did not set REGION.${RESET}"
     exit 1
 fi
 
@@ -297,21 +287,29 @@ if [ "$PROXY_ENV" == "ssh" ]; then
     echo -e "  ${CYAN}==================================================${RESET}"
     echo -e "  ${GREEN}           SSH GATEWAY - TUNNEL USERS${RESET}"
     echo -e "  ${CYAN}==================================================${RESET}"
-    echo -e "  ${YELLOW}Path: /saeka-ssh (fake-WS-handshake + raw passthrough, matching${RESET}"
-    echo -e "  ${YELLOW}HTTP Injector / NPV Tunnel style clients - not real RFC6455 WS).${RESET}"
+    echo -e "  ${YELLOW}Path /saeka-ssh: HTTP Upgrade handshake, then raw SSH (for HTTP${RESET}"
+    echo -e "  ${YELLOW}Injector / NPV Tunnel style clients, not RFC6455 framing).${RESET}"
     echo ""
     SSH_USER_LIST=()
     read -r -p "$(echo -e "  ${CYAN}Add an SSH user? [y/N]: ${RESET}")" ADD_SSH
     while [[ "$ADD_SSH" =~ ^[Yy] ]]; do
         read -r -p "$(echo -e "  ${CYAN}Username [saeka]: ${RESET}")" SSH_UNAME
-        SSH_UNAME=$(printf '%s' "${SSH_UNAME:-saeka}" | tr -dc 'A-Za-z0-9_-')
-        read -r -p "$(echo -e "  ${CYAN}Password (blank = auto-generate): ${RESET}")" SSH_PW
-        if [ -z "$SSH_PW" ]; then
-            SSH_PW=$(< /dev/urandom tr -dc 'A-Za-z0-9' | head -c16)
-            echo -e "  ${GREEN}Generated password for ${SSH_UNAME}: ${SSH_PW}${RESET}"
-            echo -e "  ${YELLOW}(shown once - write it down now)${RESET}"
+        SSH_UNAME=$(printf '%s' "${SSH_UNAME:-saeka}" | tr 'A-Z' 'a-z' | tr -dc 'a-z0-9_-')
+        if ! [[ "$SSH_UNAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+            echo -e "  ${RED}Invalid username: start with a letter, then a-z 0-9 _ - only.${RESET}"
+        else
+            read -r -p "$(echo -e "  ${CYAN}Password (blank = auto-generate): ${RESET}")" SSH_PW
+            if [ -z "$SSH_PW" ]; then
+                SSH_PW=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16 || true)
+                echo -e "  ${GREEN}Generated password for ${SSH_UNAME}: ${SSH_PW}${RESET}"
+                echo -e "  ${YELLOW}(shown once - write it down now)${RESET}"
+            fi
+            if [[ "$SSH_PW" =~ [,@[:space:]] ]]; then
+                echo -e "  ${RED}Password can't contain commas, @ or spaces - user not added.${RESET}"
+            else
+                SSH_USER_LIST+=("${SSH_UNAME}:${SSH_PW}")
+            fi
         fi
-        SSH_USER_LIST+=("${SSH_UNAME}:${SSH_PW}")
         read -r -p "$(echo -e "  ${CYAN}Add another? [y/N]: ${RESET}")" ADD_SSH
     done
     if [ "${#SSH_USER_LIST[@]}" -gt 0 ]; then
@@ -323,16 +321,27 @@ elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     echo -e "  ${CYAN}==================================================${RESET}"
     echo -e "  ${GREEN}           OVPN RELAY - UPSTREAM VM${RESET}"
     echo -e "  ${CYAN}==================================================${RESET}"
-    echo -e "  ${YELLOW}This does NOT run OpenVPN itself - it forwards /saeka-ovpn to a${RESET}"
-    echo -e "  ${YELLOW}real OpenVPN server on a VM (see deploy_vm.py). Deploy that VM${RESET}"
-    echo -e "  ${YELLOW}FIRST and have its static IP ready.${RESET}"
+    echo -e "  ${YELLOW}This forwards /saeka-ovpn to a real OpenVPN server on a VM${RESET}"
+    echo -e "  ${YELLOW}(deploy_vm.py). That server must use proto tcp, and the VM must${RESET}"
+    echo -e "  ${YELLOW}already be running with its static IP ready.${RESET}"
     echo ""
-    read -r -p "$(echo -e "  ${CYAN}OpenVPN VM static IP: ${RESET}")" OVPN_HOST
-    read -r -p "$(echo -e "  ${CYAN}OpenVPN port [1194]: ${RESET}")" OVPN_PORT
-    OVPN_PORT=${OVPN_PORT:-1194}
-    if [ -z "$OVPN_HOST" ]; then
-        echo -e "  ${RED}No IP given - the relay will start but every connection will fail.${RESET}"
-    fi
+    OVPN_HOST=""
+    while [ -z "$OVPN_HOST" ]; do
+        read -r -p "$(echo -e "  ${CYAN}OpenVPN VM static IP or hostname: ${RESET}")" OVPN_HOST
+        if ! [[ "$OVPN_HOST" =~ ^[A-Za-z0-9.-]+$ ]]; then
+            echo -e "  ${RED}Enter a valid IP or hostname.${RESET}"
+            OVPN_HOST=""
+        fi
+    done
+    OVPN_PORT=""
+    while [ -z "$OVPN_PORT" ]; do
+        read -r -p "$(echo -e "  ${CYAN}OpenVPN TCP port [1194]: ${RESET}")" OVPN_PORT
+        OVPN_PORT=${OVPN_PORT:-1194}
+        if ! [[ "$OVPN_PORT" =~ ^[0-9]+$ ]] || [ "$OVPN_PORT" -lt 1 ] || [ "$OVPN_PORT" -gt 65535 ]; then
+            echo -e "  ${RED}Port must be 1-65535.${RESET}"
+            OVPN_PORT=""
+        fi
+    done
     echo ""
     ENV_VARS="^@^OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
 else
@@ -385,23 +394,21 @@ echo -e "  ${YELLOW}------------------------------------------------------------
 if [ "$PROXY_ENV" == "ssh" ]; then
     echo -e "  ${CYAN}                  SSH GATEWAY${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
-    echo -e "  ${GREEN}Path: /saeka-ssh${RESET}  (experimental protocol)"
     if [ -n "$SSH_USERS_CSV" ]; then
         echo -e "  ${CYAN}Users configured: ${GREEN}$(echo "$SSH_USERS_CSV" | tr ',' '\n' | cut -d: -f1 | paste -sd, -)${RESET}"
     else
         echo -e "  ${YELLOW}No users were added - a one-off random account was generated in${RESET}"
         echo -e "  ${YELLOW}the container logs (won't survive a redeploy). Re-run and add one.${RESET}"
     fi
-    echo -e "  ${CYAN}Point your SSH-over-WS client at:${RESET}"
-    echo -e "  ${CYAN}  wss://${CLEAN_HOST}/saeka-ssh${RESET}"
+    echo -e "  ${CYAN}Host    ${GREEN}${CLEAN_HOST}${CYAN}   Port ${GREEN}443 (TLS/SNI)${RESET}"
+    echo -e "  ${CYAN}Payload ${GREEN}GET /saeka-ssh HTTP/1.1[crlf]Host: ${CLEAN_HOST}[crlf]Upgrade: websocket[crlf][crlf]${RESET}"
+    echo -e "  ${CYAN}UDPGW   ${GREEN}127.0.0.1:7300${RESET}"
 elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     echo -e "  ${CYAN}                  OVPN RELAY${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
-    echo -e "  ${GREEN}Path: /saeka-ovpn${RESET}  -> forwards to ${OVPN_HOST}:${OVPN_PORT}"
-    echo -e "  ${YELLOW}This is only useful once that VM is actually running OpenVPN${RESET}"
-    echo -e "  ${YELLOW}(deploy_vm.py). This service does not run OpenVPN itself.${RESET}"
-    echo -e "  ${CYAN}Point your client-side WS wrapper at:${RESET}"
-    echo -e "  ${CYAN}  wss://${CLEAN_HOST}/saeka-ovpn${RESET}"
+    echo -e "  ${CYAN}Forwards /saeka-ovpn to ${GREEN}${OVPN_HOST}:${OVPN_PORT}${RESET}"
+    echo -e "  ${CYAN}Host    ${GREEN}${CLEAN_HOST}${CYAN}   Port ${GREEN}443 (TLS/SNI)${RESET}"
+    echo -e "  ${CYAN}Payload ${GREEN}GET /saeka-ovpn HTTP/1.1[crlf]Host: ${CLEAN_HOST}[crlf]Upgrade: websocket[crlf][crlf]${RESET}"
 else
     echo -e "  ${CYAN}                    PATHS & PROTOCOLS${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
@@ -417,8 +424,6 @@ if [ "$PROXY_ENV" == "openresty" ]; then
     echo -e "  ${YELLOW}gRPC/H2 paths above will return 501 on OpenResty - see engine note.${RESET}"
 fi
 echo ""
-
-FINAL_HOST="$CLEAN_HOST"
 
 echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${GREEN}       CUSTOM DOMAIN & UNIVERSAL SNI MANAGER${RESET}"
@@ -494,6 +499,8 @@ if [ -n "$LB_INPUT" ]; then
                 --global --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
+    CERT_DIR=$(mktemp -d)
+    FINAL_CERTS=""
     CERT_TEMP="${SERVICE_NAME}-tmp-$(date +%s)"
     CERT_MANAGED="${SERVICE_NAME}-mng-$(date +%s)"
 
@@ -501,14 +508,13 @@ if [ -n "$LB_INPUT" ]; then
         echo -e "  ${CYAN}Provisioning Universal SNI (Self-Signed) Certificate...${RESET}"
         run_quiet "Generating self-signed cert" lb.log \
             openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-            -keyout key.pem -out cert.pem -subj "/CN=cloudfront.net" 2>/dev/null
+            -keyout "$CERT_DIR/key.pem" -out "$CERT_DIR/cert.pem" -subj "/CN=cloudfront.net" 2>/dev/null || lb_setup_failed=1
 
         run_quiet "Uploading self-managed cert to GCP" lb.log \
             gcloud compute ssl-certificates create "$CERT_TEMP" \
-                --certificate=cert.pem --private-key=key.pem \
+                --certificate="$CERT_DIR/cert.pem" --private-key="$CERT_DIR/key.pem" \
                 --global --project="$PROJECT_ID" || lb_setup_failed=1
 
-        rm -f key.pem cert.pem
         FINAL_CERTS="$CERT_TEMP"
         FINAL_HOST="$STATIC_IP"
     elif [ "$LB_INPUT" == "LOCAL" ]; then
@@ -531,12 +537,11 @@ if [ -n "$LB_INPUT" ]; then
         DOMAINS_CSV=$(paste -sd, "$DOMAINS_FILE")
 
         openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-            -keyout key.pem -out cert.pem -subj "/CN=${LB_INPUT}" 2>/dev/null
+            -keyout "$CERT_DIR/key.pem" -out "$CERT_DIR/cert.pem" -subj "/CN=${LB_INPUT}" 2>/dev/null || lb_setup_failed=1
         run_quiet "Uploading instant temporary cert" lb.log \
             gcloud compute ssl-certificates create "$CERT_TEMP" \
-                --certificate=cert.pem --private-key=key.pem \
+                --certificate="$CERT_DIR/cert.pem" --private-key="$CERT_DIR/key.pem" \
                 --global --project="$PROJECT_ID" || lb_setup_failed=1
-        rm -f key.pem cert.pem
 
         run_quiet "Requesting real managed cert for ${DOMAINS_CSV}" lb.log \
             gcloud compute ssl-certificates create "$CERT_MANAGED" \
@@ -546,7 +551,14 @@ if [ -n "$LB_INPUT" ]; then
         FINAL_HOST="$LB_INPUT"
     fi
 
-    if ! gcloud compute target-https-proxies describe "$HTTPS_PROXY_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
+    rm -rf "$CERT_DIR"
+    if [ -z "$FINAL_CERTS" ]; then
+        lb_setup_failed=1
+    fi
+
+    if [ "$lb_setup_failed" -ne 0 ]; then
+        :
+    elif ! gcloud compute target-https-proxies describe "$HTTPS_PROXY_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating HTTPS proxy with cert(s)" lb.log \
             gcloud compute target-https-proxies create "$HTTPS_PROXY_NAME" \
                 --url-map="$URLMAP_NAME" --ssl-certificates="$FINAL_CERTS" \
@@ -557,7 +569,7 @@ if [ -n "$LB_INPUT" ]; then
                 --ssl-certificates="$FINAL_CERTS" --global --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
-    if ! gcloud compute forwarding-rules describe "$FWD_RULE_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
+    if [ "$lb_setup_failed" -eq 0 ] && ! gcloud compute forwarding-rules describe "$FWD_RULE_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating forwarding rule" lb.log \
             gcloud compute forwarding-rules create "$FWD_RULE_NAME" \
                 --global --target-https-proxy="$HTTPS_PROXY_NAME" \
@@ -584,14 +596,17 @@ if [ -n "$LB_INPUT" ]; then
         fi
     else
         echo -e "  ${RED}Load balancer setup hit an error above - falling back to the raw Cloud Run host.${RESET}"
+        FINAL_HOST="$CLEAN_HOST"
     fi
     rm -f lb.log
     echo ""
 fi
 
-echo -e "  ${CYAN}Generate client links / outbound JSON with:${RESET}"
-echo -e "  ${GREEN}./generate-client-links.sh ${FINAL_HOST}${RESET}"
-echo ""
+if [ "$STANDALONE" -eq 0 ]; then
+    echo -e "  ${CYAN}Generate client links / outbound JSON with:${RESET}"
+    echo -e "  ${GREEN}./generate-client-links.sh ${FINAL_HOST}${RESET}"
+    echo ""
+fi
 
 rm -f build.log deploy.log lb.log
 echo -e "  ${GREEN}Deployer session complete.${RESET}"
