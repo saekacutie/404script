@@ -38,6 +38,20 @@ if [ "$created" -eq 0 ]; then
     exit 1
 fi
 
+# Optional: also relay /saeka-ovpn to a real OpenVPN server (proto tcp) on a VM
+OVPN_HOST="${OVPN_UPSTREAM_HOST:-}"
+OVPN_PORT="${OVPN_UPSTREAM_PORT:-1194}"
+if [ -n "$OVPN_HOST" ]; then
+    if ! [[ "$OVPN_HOST" =~ ^[A-Za-z0-9.-]+$ ]]; then
+        echo "[!] OVPN_UPSTREAM_HOST is not a valid IP or hostname" >&2
+        exit 1
+    fi
+    if ! [[ "$OVPN_PORT" =~ ^[0-9]+$ ]] || [ "$OVPN_PORT" -lt 1 ] || [ "$OVPN_PORT" -gt 65535 ]; then
+        echo "[!] OVPN_UPSTREAM_PORT must be 1-65535" >&2
+        exit 1
+    fi
+fi
+
 # Host keys (RSA + ECDSA + ED25519 so old and new clients can all connect)
 mkdir -p /etc/dropbear
 [ -s /etc/dropbear/dropbear_rsa_host_key ]     || dropbearkey -t rsa -s 2048 -f /etc/dropbear/dropbear_rsa_host_key >/dev/null
@@ -74,6 +88,13 @@ pids+=($!)
 BRIDGE_LISTEN_PORT=2222 BRIDGE_TARGET_HOST=127.0.0.1 BRIDGE_TARGET_PORT=2200 \
     python3 /opt/ws_bridge.py &
 pids+=($!)
+
+if [ -n "$OVPN_HOST" ]; then
+    echo "[+] Relaying /saeka-ovpn -> ${OVPN_HOST}:${OVPN_PORT}"
+    BRIDGE_LISTEN_PORT=2223 BRIDGE_TARGET_HOST="$OVPN_HOST" BRIDGE_TARGET_PORT="$OVPN_PORT" \
+        python3 /opt/ws_bridge.py &
+    pids+=($!)
+fi
 
 nginx -g 'daemon off;' &
 pids+=($!)
