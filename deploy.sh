@@ -158,7 +158,7 @@ echo -e "  ${YELLOW}3) Caddy      - full protocol support incl. gRPC (fast & sta
 echo -e "  ${YELLOW}4) H2O        - full protocol support incl. gRPC${RESET}"
 echo -e "  ${YELLOW}5) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
 echo -e "  ${YELLOW}6) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
-echo -e "  ${YELLOW}7) SSH Gateway - standalone SSH-over-WS (+ UDPGW), not the VLESS/etc stack${RESET}"
+echo -e "  ${YELLOW}7) SSH Gateway - standalone SSH-over-WS (+ UDPGW), optional OpenVPN relay${RESET}"
 echo -e "  ${YELLOW}8) OVPN Relay  - standalone WS relay to a REAL OpenVPN server on a VM${RESET}"
 echo ""
 read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-8] (Default 1): ${RESET}")" ENGINE_CHOICE
@@ -282,6 +282,28 @@ if ! run_quiet "Building ${ENGINE} image" build.log \
 fi
 rm -f "$CB_CONFIG"
 
+prompt_ovpn_upstream() {
+    OVPN_HOST=""
+    while [ -z "$OVPN_HOST" ]; do
+        read -r -p "$(echo -e "  ${CYAN}OpenVPN VM static IP or hostname: ${RESET}")" OVPN_HOST
+        if ! [[ "$OVPN_HOST" =~ ^[A-Za-z0-9.-]+$ ]]; then
+            echo -e "  ${RED}Enter a valid IP or hostname.${RESET}"
+            OVPN_HOST=""
+        fi
+    done
+    OVPN_PORT=""
+    while [ -z "$OVPN_PORT" ]; do
+        read -r -p "$(echo -e "  ${CYAN}OpenVPN TCP port [1194]: ${RESET}")" OVPN_PORT
+        OVPN_PORT=${OVPN_PORT:-1194}
+        if ! [[ "$OVPN_PORT" =~ ^[0-9]+$ ]] || [ "$OVPN_PORT" -lt 1 ] || [ "$OVPN_PORT" -gt 65535 ]; then
+            echo -e "  ${RED}Port must be 1-65535.${RESET}"
+            OVPN_PORT=""
+        fi
+    done
+}
+
+OVPN_HOST=""
+OVPN_PORT=""
 SSH_USERS_CSV=""
 if [ "$PROXY_ENV" == "ssh" ]; then
     echo -e "  ${CYAN}==================================================${RESET}"
@@ -317,6 +339,13 @@ if [ "$PROXY_ENV" == "ssh" ]; then
     fi
     echo ""
     ENV_VARS="^@^SSH_USERS=${SSH_USERS_CSV}"
+    read -r -p "$(echo -e "  ${CYAN}Also relay OpenVPN (/saeka-ovpn) to a VM on this same service? [y/N]: ${RESET}")" ADD_OVPN
+    if [[ "$ADD_OVPN" =~ ^[Yy] ]]; then
+        echo -e "  ${YELLOW}The OpenVPN server on the VM must use proto tcp.${RESET}"
+        prompt_ovpn_upstream
+        ENV_VARS="${ENV_VARS}@OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
+    fi
+    echo ""
 elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     echo -e "  ${CYAN}==================================================${RESET}"
     echo -e "  ${GREEN}           OVPN RELAY - UPSTREAM VM${RESET}"
@@ -325,23 +354,7 @@ elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     echo -e "  ${YELLOW}(deploy_vm.py). That server must use proto tcp, and the VM must${RESET}"
     echo -e "  ${YELLOW}already be running with its static IP ready.${RESET}"
     echo ""
-    OVPN_HOST=""
-    while [ -z "$OVPN_HOST" ]; do
-        read -r -p "$(echo -e "  ${CYAN}OpenVPN VM static IP or hostname: ${RESET}")" OVPN_HOST
-        if ! [[ "$OVPN_HOST" =~ ^[A-Za-z0-9.-]+$ ]]; then
-            echo -e "  ${RED}Enter a valid IP or hostname.${RESET}"
-            OVPN_HOST=""
-        fi
-    done
-    OVPN_PORT=""
-    while [ -z "$OVPN_PORT" ]; do
-        read -r -p "$(echo -e "  ${CYAN}OpenVPN TCP port [1194]: ${RESET}")" OVPN_PORT
-        OVPN_PORT=${OVPN_PORT:-1194}
-        if ! [[ "$OVPN_PORT" =~ ^[0-9]+$ ]] || [ "$OVPN_PORT" -lt 1 ] || [ "$OVPN_PORT" -gt 65535 ]; then
-            echo -e "  ${RED}Port must be 1-65535.${RESET}"
-            OVPN_PORT=""
-        fi
-    done
+    prompt_ovpn_upstream
     echo ""
     ENV_VARS="^@^OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
 else
@@ -403,6 +416,10 @@ if [ "$PROXY_ENV" == "ssh" ]; then
     echo -e "  ${CYAN}Host    ${GREEN}${CLEAN_HOST}${CYAN}   Port ${GREEN}443 (TLS/SNI)${RESET}"
     echo -e "  ${CYAN}Payload ${GREEN}GET /saeka-ssh HTTP/1.1[crlf]Host: ${CLEAN_HOST}[crlf]Upgrade: websocket[crlf][crlf]${RESET}"
     echo -e "  ${CYAN}UDPGW   ${GREEN}127.0.0.1:7300${RESET}"
+    if [ -n "$OVPN_HOST" ]; then
+        echo -e "  ${CYAN}OpenVPN ${GREEN}GET /saeka-ovpn HTTP/1.1[crlf]Host: ${CLEAN_HOST}[crlf]Upgrade: websocket[crlf][crlf]${RESET}"
+        echo -e "  ${CYAN}        ${GREEN}/saeka-ovpn -> ${OVPN_HOST}:${OVPN_PORT}${RESET}"
+    fi
 elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     echo -e "  ${CYAN}                  OVPN RELAY${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
