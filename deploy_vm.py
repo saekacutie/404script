@@ -7,11 +7,19 @@ It deliberately never attempts to repoint a *.run.app hostname.
 Requirements: Python 3, gcloud authenticated, and an active GCP project.
 Optional DNS: set CF_API_TOKEN and pass a domain when prompted. The token must
 only have Cloudflare Zone DNS Edit permission.
+
+OpenVPN logins: the same "user:pass,user2:pass2" list you give deploy.sh
+(export SSH_USERS first to share it between both). Only PBKDF2 hashes are sent
+to the VM. Clients then need BOTH the client certificate (inside the .ovpn) and
+a login. Leave it blank for certificate-only auth.
+NOTE: the Cloud Run relay (/saeka-ovpn) needs OpenVPN on proto TCP.
 """
 from __future__ import annotations
 import getpass
+import hashlib
 import json
 import os
+import re
 import secrets
 import shlex
 import subprocess
@@ -26,6 +34,7 @@ GREEN = "\033[1;32m"; RED = "\033[1;31m"; CYAN = "\033[1;36m"
 YELLOW = "\033[1;33m"
 
 WORKDIR = Path.home() / ".deploy_vm"
+PBKDF2_ITER = 200_000   # must match the auth script inside STARTUP
 
 def colour(text: str, code: str) -> str:
     return f"{code}{text}{RESET}"
@@ -86,6 +95,20 @@ def firewall(project_id: str, name: str, protocol: str, port: int, tag: str, sou
          "--direction=INGRESS", "--action=ALLOW", f"--rules={protocol}:{port}",
          f"--source-ranges={sources}", f"--target-tags={tag}"])
 
+def hash_users(csv: str) -> str:
+    """'user:pass,user2:pass2' -> 'user:salt:pbkdf2hex,...' (no plaintext leaves this machine)."""
+    out = []
+    for pair in filter(None, (p.strip() for p in csv.split(","))):
+        user, sep, password = pair.partition(":")
+        if not sep or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user):
+            die(f"invalid OpenVPN user entry '{user}' (lowercase letters, digits, _ or -; format user:pass)")
+        if not password or re.search(r"[,@\s]", password):
+            die(f"password for '{user}' is empty or contains a comma, @ or whitespace")
+        salt = secrets.token_hex(16)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), PBKDF2_ITER)
+        out.append(f"{user}:{salt}:{digest.hex()}")
+    return ",".join(out)
+
 def startup(config: dict) -> str:
     # Values are shell-quoted before substitution. The generated script is
     # also saved locally so a failed first boot is reproducible/auditable.
@@ -99,7 +122,8 @@ def startup(config: dict) -> str:
         .replace("@@SNI@@", values["reality_sni"])\
         .replace("@@OPORT@@", values["ovpn_port"])\
         .replace("@@OPROTO@@", values["ovpn_proto"])\
-        .replace("@@PUBKEY@@", values["pubkey"])
+        .replace("@@PUBKEY@@", values["pubkey"])\
+        .replace("@@USERS@@", values["users"])
 
 def create_vm(project_id: str, zone: str, name: str, machine: str, ip: str, tag: str, script: Path) -> None:
     if gcloud_json(["compute", "instances", "describe", name, "--zone", zone, "--project", project_id]):
@@ -131,8 +155,14 @@ def wait_ready(project_id: str, zone: str, name: str, timeout: int = 900) -> dic
     die(f"VM setup timed out; inspect with: gcloud compute ssh {name} --zone {zone} --tunnel-through-iap")
 
 def scp(project_id: str, zone: str, name: str, remote: str, local: Path) -> bool:
-    result = cmd(["gcloud", "compute", "scp", f"{name}:{remote}", str(local),
+    # /root is not readable by the SSH user, so stage a copy first.
+    staged = "/tmp/client1.ovpn"
+    prep = ssh(project_id, zone, name, f"sudo cp {remote} {staged} && sudo chmod 644 {staged}")
+    if prep.returncode:
+        return False
+    result = cmd(["gcloud", "compute", "scp", f"{name}:{staged}", str(local),
                   "--project", project_id, "--zone", zone, "--tunnel-through-iap"], check=False)
+    ssh(project_id, zone, name, f"rm -f {staged}")
     return result.returncode == 0
 
 def cloudflare(domain: str, subdomain: str, ip: str, token: str) -> str | None:
@@ -163,33 +193,39 @@ def cloudflare(domain: str, subdomain: str, ip: str, token: str) -> str | None:
     return fqdn if result.get("success") else None
 
 # ------------------------------------------------------------------------------
-# STARTUP SCRIPT — Fixed for Xray ≥ 26.3.27: removes legacy config, uses XHTTP
+# STARTUP SCRIPT - Xray >= 26.3.27 (XHTTP), OpenVPN with cert + user:pass
 # ------------------------------------------------------------------------------
 STARTUP = r'''#!/bin/bash
 set -euo pipefail
-exec > /var/log/vm-setup.log 2>&1
+exec >> /var/log/vm-setup.log 2>&1
 export DEBIAN_FRONTEND=noninteractive
+
+# GCE re-runs startup scripts on every boot. Provisioning is one-shot:
+# re-running easyrsa init-pki would fail (or wipe the PKI).
+if [ -f /etc/vm-setup-complete.json ]; then
+  echo "=== Already provisioned; skipping (delete the VM for a clean rebuild) ==="
+  exit 0
+fi
 
 echo "=== Starting VM provisioning ==="
 
 apt-get update -y
-apt-get install -y curl unzip ca-certificates openssl jq
+apt-get install -y curl unzip ca-certificates openssl jq python3
 
 REALITY=@@REALITY@@; OVPN=@@OVPN@@; SSH_TUNNEL=@@SSH@@
 RPORT=@@RPORT@@; DEST=@@DEST@@; SNI=@@SNI@@
 OPORT=@@OPORT@@; OPROTO=@@OPROTO@@; PUBKEY=@@PUBKEY@@
+USERS=@@USERS@@
 
 IFACE=$(ip route | awk '/default/ {print $5; exit}')
 IP=$(curl -sf -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip)
 
-# --------------------------
-# CRITICAL: Remove any legacy/incompatible config before Xray starts
-# This prevents "HTTP transport removed" crash loop
-# --------------------------
+# Remove any legacy/incompatible Xray config before it starts
 rm -f /etc/xray/config.json /usr/local/etc/xray/config.json
 mkdir -p /usr/local/etc/xray
 
 REALITY_JSON='{"enabled":false}'; OVPN_JSON='{"enabled":false}'; SSH_JSON='{"enabled":false}'
+AUTH_ON=false
 
 if [ "$REALITY" = true ]; then
   echo "=== Installing Xray + VLESS+REALITY ==="
@@ -201,7 +237,6 @@ if [ "$REALITY" = true ]; then
   PUBLIC=$(echo "$KEYS" | awk -F': ' '/Public key/{print $2}')
   SID=$(openssl rand -hex 8)
 
-  # Clean VLESS+REALITY config — no legacy HTTP transport here
   jq -n \
     --arg uuid "$UUID" \
     --arg private "$PRIVATE" \
@@ -235,7 +270,7 @@ if [ "$REALITY" = true ]; then
       outbounds: [{protocol: "freedom"}]
     }' > /usr/local/etc/xray/config.json
 
-  # Symlink so all expected paths get the same clean config
+  mkdir -p /etc/xray
   ln -sf /usr/local/etc/xray/config.json /etc/xray/config.json
 
   systemctl enable --now xray
@@ -268,10 +303,10 @@ if [ "$OVPN" = true ]; then
   ./easyrsa --batch sign-req server server
   ./easyrsa --batch gen-req client1 nopass
   ./easyrsa --batch sign-req client client1
-  ./easyrsa gen-dh
   openvpn --genkey tls-crypt "$EZ/tc.key"
 
   mkdir -p /etc/openvpn/server
+  # dh none = ECDH only: no slow gen-dh on a small VM, supported by OpenVPN 2.4+.
   cat > /etc/openvpn/server/server.conf <<EOF
 port $OPORT
 proto $OPROTO
@@ -279,7 +314,7 @@ dev tun
 ca $EZ/pki/ca.crt
 cert $EZ/pki/issued/server.crt
 key $EZ/pki/private/server.key
-dh $EZ/pki/dh.pem
+dh none
 tls-crypt $EZ/tc.key
 server 10.8.0.0 255.255.255.0
 push "redirect-gateway def1 bypass-dhcp"
@@ -293,6 +328,55 @@ persist-key
 persist-tun
 EOF
   [ "$OPROTO" = udp ] && echo 'explicit-exit-notify 1' >> /etc/openvpn/server/server.conf
+
+  if [ -n "$USERS" ]; then
+    echo "=== Enabling OpenVPN user:pass login ==="
+    printf '%s\n' "$USERS" | tr ',' '\n' > /etc/openvpn/users.hash
+    chown nobody:nogroup /etc/openvpn/users.hash
+    chmod 600 /etc/openvpn/users.hash
+
+    cat > /etc/openvpn/auth.py <<'AUTHEOF'
+#!/usr/bin/python3
+# OpenVPN auth-user-pass-verify (via-file): line 1 = username, line 2 = password.
+# users.hash lines: user:salt_hex:pbkdf2_sha256_hex  (200000 iterations)
+import hashlib, hmac, sys
+try:
+    with open(sys.argv[1]) as f:
+        user = f.readline().rstrip("\n")
+        password = f.readline().rstrip("\n")
+    ok = False
+    with open("/etc/openvpn/users.hash") as f:
+        for line in f:
+            parts = line.strip().split(":")
+            if len(parts) != 3:
+                continue
+            u, salt, expected = parts
+            if hmac.compare_digest(u, user):
+                got = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 200000).hex()
+                ok = hmac.compare_digest(got, expected)
+                break
+    sys.exit(0 if ok else 1)
+except Exception:
+    sys.exit(1)
+AUTHEOF
+    chmod 755 /etc/openvpn/auth.py
+
+    cat >> /etc/openvpn/server/server.conf <<EOF
+script-security 2
+auth-user-pass-verify /etc/openvpn/auth.py via-file
+verify-client-cert require
+EOF
+    AUTH_ON=true
+  fi
+
+  # Debian's openvpn-server@ unit sets LimitNPROC=10, which starves the
+  # auth script (it is forked per login attempt).
+  mkdir -p /etc/systemd/system/openvpn-server@server.service.d
+  cat > /etc/systemd/system/openvpn-server@server.service.d/override.conf <<EOF
+[Service]
+LimitNPROC=infinity
+EOF
+  systemctl daemon-reload
 
   echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-openvpn.conf
   sysctl --system >/dev/null 2>&1 || true
@@ -310,11 +394,14 @@ EOF
     echo "proto $OPROTO"
     echo "remote $IP $OPORT"
     echo "nobind"
+    echo "resolv-retry infinite"
     echo "persist-key"
     echo "persist-tun"
     echo "remote-cert-tls server"
     echo "cipher AES-256-GCM"
     echo "auth SHA256"
+    echo "verb 3"
+    if [ "$AUTH_ON" = true ]; then echo "auth-user-pass"; fi
     echo '<ca>'; pem "$EZ/pki/ca.crt"; echo '</ca>'
     echo '<cert>'; pem "$EZ/pki/issued/client1.crt"; echo '</cert>'
     echo '<key>'; pem "$EZ/pki/private/client1.key"; echo '</key>'
@@ -323,8 +410,11 @@ EOF
   chmod 600 /root/client1.ovpn
 
   if systemctl is-active --quiet openvpn-server@server; then
-    OVPN_JSON=$(jq -n --arg proto "$OPROTO" --argjson port "$OPORT" \
-      '{enabled:true,proto:$proto,port:$port}')
+    OVPN_JSON=$(jq -n --arg proto "$OPROTO" --argjson port "$OPORT" --argjson auth "$AUTH_ON" \
+      '{enabled:true,proto:$proto,port:$port,auth:$auth}')
+  else
+    echo "WARNING: openvpn-server@server failed to start"
+    journalctl -u openvpn-server@server --no-pager -n 30 || true
   fi
 fi
 
@@ -386,9 +476,21 @@ def main() -> None:
     dest = ask("REALITY destination host:port", f"{sni}:443") if reality else f"{sni}:443"
 
     oport = int(ask("OpenVPN port", "1194")) if ovpn else 1194
-    oproto = ask("OpenVPN protocol (udp/tcp)", "udp").lower() if ovpn else "udp"
-    if oproto not in {"udp", "tcp"}:
-        die("OpenVPN protocol must be udp or tcp")
+    oproto = "udp"
+    users_hash = ""
+    if ovpn:
+        oproto = ask("OpenVPN protocol (udp/tcp; tcp is REQUIRED for the Cloud Run relay)", "udp").lower()
+        if oproto not in {"udp", "tcp"}:
+            die("OpenVPN protocol must be udp or tcp")
+        raw_users = os.environ.get("SSH_USERS", "")
+        if raw_users:
+            print(colour("  Using logins from the SSH_USERS environment variable.", YELLOW))
+        else:
+            raw_users = getpass.getpass(
+                "  OpenVPN logins user:pass,user2:pass2 (blank = certificate only): ").strip()
+        users_hash = hash_users(raw_users) if raw_users else ""
+        if not users_hash:
+            print(colour("  No logins: anyone holding the .ovpn file can connect.", YELLOW))
 
     key_path = WORKDIR / f"{name}_tunnel_key"
     WORKDIR.mkdir(parents=True, exist_ok=True)
@@ -414,6 +516,7 @@ def main() -> None:
         "ovpn_port": oport,
         "ovpn_proto": oproto,
         "pubkey": pubkey,
+        "users": users_hash,
     }
 
     script_path = WORKDIR / f"{name}-startup.sh"
@@ -438,9 +541,18 @@ def main() -> None:
         r = result["reality"]
         print(f"REALITY: vless://{r['uuid']}@{host}:{r['port']}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={r['serverName']}&fp=chrome&pbk={r['publicKey']}&sid={r['shortId']}&type=tcp#saeka-reality")
 
-    if ovpn and scp(project_id, zone, name, "/root/client1.ovpn", WORKDIR / f"{name}-client1.ovpn"):
-        (WORKDIR / f"{name}-client1.ovpn").chmod(0o600)
-        print(f"OpenVPN profile: {WORKDIR / f'{name}-client1.ovpn'}")
+    if ovpn:
+        local_ovpn = WORKDIR / f"{name}-client1.ovpn"
+        if scp(project_id, zone, name, "/root/client1.ovpn", local_ovpn):
+            local_ovpn.chmod(0o600)
+            print(f"OpenVPN profile: {local_ovpn}")
+            if result.get("openvpn", {}).get("auth"):
+                print("  Clients are asked for a username/password on connect (your logins above).")
+            if oproto == "udp":
+                print(colour("  Note: proto udp - the Cloud Run relay (/saeka-ovpn) needs tcp.", YELLOW))
+            print("  deploy.sh can embed this file and serve it at https://<run.app>/cert")
+        else:
+            print(colour("  Could not copy the .ovpn profile from the VM.", YELLOW))
 
     if ssh_tunnel:
         print(f"SSH SOCKS: ssh -i {key_path} -D 1080 -N tunnel@{host}")

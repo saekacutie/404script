@@ -158,8 +158,8 @@ echo -e "  ${YELLOW}3) Caddy      - full protocol support incl. gRPC (fast & sta
 echo -e "  ${YELLOW}4) H2O        - full protocol support incl. gRPC${RESET}"
 echo -e "  ${YELLOW}5) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
 echo -e "  ${YELLOW}6) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
-echo -e "  ${YELLOW}7) SSH Gateway - standalone SSH-over-WS (+ UDPGW), optional OpenVPN relay${RESET}"
-echo -e "  ${YELLOW}8) OVPN Relay  - standalone WS relay to a REAL OpenVPN server on a VM${RESET}"
+echo -e "  ${YELLOW}7) SSH Gateway - standalone SSH-over-WS (+ UDPGW), optional OpenVPN relay + /cert${RESET}"
+echo -e "  ${YELLOW}8) OVPN Relay  - standalone WS relay to a REAL OpenVPN server on a VM (+ /cert)${RESET}"
 echo ""
 read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-8] (Default 1): ${RESET}")" ENGINE_CHOICE
 
@@ -282,6 +282,9 @@ if ! run_quiet "Building ${ENGINE} image" build.log \
 fi
 rm -f "$CB_CONFIG"
 
+# ------------------------------------------------------------------------
+# Prompts shared by the SSH gateway (7) and OVPN relay (8)
+# ------------------------------------------------------------------------
 prompt_ovpn_upstream() {
     OVPN_HOST=""
     while [ -z "$OVPN_HOST" ]; do
@@ -302,18 +305,44 @@ prompt_ovpn_upstream() {
     done
 }
 
-OVPN_HOST=""
-OVPN_PORT=""
+# Embeds the client .ovpn written by deploy_vm.py so /cert can serve it.
+prompt_ovpn_profile() {
+    OVPN_PROFILE_B64=""
+    local f
+    f=$(ls -t "$HOME"/.deploy_vm/*-client1.ovpn 2>/dev/null | head -n1 || true)
+    if [ -z "$f" ]; then
+        echo -e "  ${YELLOW}No profile from deploy_vm.py found in ~/.deploy_vm - /cert stays disabled.${RESET}"
+        return 0
+    fi
+    echo -e "  ${CYAN}Found OpenVPN profile: ${GREEN}${f}${RESET}"
+    if ! grep -q "^remote ${OVPN_HOST} " "$f"; then
+        echo -e "  ${YELLOW}Warning: its 'remote' line doesn't match ${OVPN_HOST}.${RESET}"
+    fi
+    if grep -q "^proto udp" "$f"; then
+        echo -e "  ${YELLOW}Warning: profile is proto udp - the Cloud Run relay needs an OpenVPN server on tcp.${RESET}"
+    fi
+    local yn
+    read -r -p "$(echo -e "  ${CYAN}Serve it at /cert (login = your SSH users)? [Y/n]: ${RESET}")" yn
+    if ! [[ "$yn" =~ ^[Nn] ]]; then
+        OVPN_PROFILE_B64=$(base64 < "$f" | tr -d '\n')
+        echo -e "  ${YELLOW}The profile holds the client private key - it is stored in the service's${RESET}"
+        echo -e "  ${YELLOW}env vars, so limit who can view this Cloud Run service.${RESET}"
+    fi
+}
+
 SSH_USERS_CSV=""
-if [ "$PROXY_ENV" == "ssh" ]; then
-    echo -e "  ${CYAN}==================================================${RESET}"
-    echo -e "  ${GREEN}           SSH GATEWAY - TUNNEL USERS${RESET}"
-    echo -e "  ${CYAN}==================================================${RESET}"
-    echo -e "  ${YELLOW}Path /saeka-ssh: HTTP Upgrade handshake, then raw SSH (for HTTP${RESET}"
-    echo -e "  ${YELLOW}Injector / NPV Tunnel style clients, not RFC6455 framing).${RESET}"
-    echo ""
+collect_users() {
+    local purpose="$1" use_env=""
+    SSH_USERS_CSV=""
+    if [ -n "${SSH_USERS:-}" ]; then
+        read -r -p "$(echo -e "  ${CYAN}Use SSH_USERS from your environment for ${purpose}? [Y/n]: ${RESET}")" use_env
+        if ! [[ "$use_env" =~ ^[Nn] ]]; then
+            SSH_USERS_CSV="$SSH_USERS"
+            return 0
+        fi
+    fi
     SSH_USER_LIST=()
-    read -r -p "$(echo -e "  ${CYAN}Add an SSH user? [y/N]: ${RESET}")" ADD_SSH
+    read -r -p "$(echo -e "  ${CYAN}Add a user for ${purpose}? [y/N]: ${RESET}")" ADD_SSH
     while [[ "$ADD_SSH" =~ ^[Yy] ]]; do
         read -r -p "$(echo -e "  ${CYAN}Username [saeka]: ${RESET}")" SSH_UNAME
         SSH_UNAME=$(printf '%s' "${SSH_UNAME:-saeka}" | tr 'A-Z' 'a-z' | tr -dc 'a-z0-9_-')
@@ -337,6 +366,19 @@ if [ "$PROXY_ENV" == "ssh" ]; then
     if [ "${#SSH_USER_LIST[@]}" -gt 0 ]; then
         SSH_USERS_CSV=$(IFS=,; echo "${SSH_USER_LIST[*]}")
     fi
+}
+
+OVPN_HOST=""
+OVPN_PORT=""
+OVPN_PROFILE_B64=""
+if [ "$PROXY_ENV" == "ssh" ]; then
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${GREEN}           SSH GATEWAY - TUNNEL USERS${RESET}"
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${YELLOW}Path /saeka-ssh: HTTP Upgrade handshake, then raw SSH (for HTTP${RESET}"
+    echo -e "  ${YELLOW}Injector / NPV Tunnel style clients, not RFC6455 framing).${RESET}"
+    echo ""
+    collect_users "the SSH gateway"
     echo ""
     ENV_VARS="^@^SSH_USERS=${SSH_USERS_CSV}"
     read -r -p "$(echo -e "  ${CYAN}Also relay OpenVPN (/saeka-ovpn) to a VM on this same service? [y/N]: ${RESET}")" ADD_OVPN
@@ -344,6 +386,13 @@ if [ "$PROXY_ENV" == "ssh" ]; then
         echo -e "  ${YELLOW}The OpenVPN server on the VM must use proto tcp.${RESET}"
         prompt_ovpn_upstream
         ENV_VARS="${ENV_VARS}@OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
+        prompt_ovpn_profile
+        if [ -n "$OVPN_PROFILE_B64" ]; then
+            ENV_VARS="${ENV_VARS}@OVPN_PROFILE_B64=${OVPN_PROFILE_B64}"
+            if [ -z "$SSH_USERS_CSV" ]; then
+                echo -e "  ${YELLOW}No users were added, so /cert will stay locked (503). Re-run with a user.${RESET}"
+            fi
+        fi
     fi
     echo ""
 elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
@@ -355,8 +404,19 @@ elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     echo -e "  ${YELLOW}already be running with its static IP ready.${RESET}"
     echo ""
     prompt_ovpn_upstream
-    echo ""
     ENV_VARS="^@^OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
+    prompt_ovpn_profile
+    if [ -n "$OVPN_PROFILE_B64" ]; then
+        echo -e "  ${CYAN}/cert needs a login - use the same user:pass as your OpenVPN users.${RESET}"
+        collect_users "the /cert download login"
+        if [ -n "$SSH_USERS_CSV" ]; then
+            ENV_VARS="${ENV_VARS}@SSH_USERS=${SSH_USERS_CSV}@OVPN_PROFILE_B64=${OVPN_PROFILE_B64}"
+        else
+            echo -e "  ${YELLOW}No users given - /cert disabled (it never serves the key without a login).${RESET}"
+            OVPN_PROFILE_B64=""
+        fi
+    fi
+    echo ""
 else
     ENV_VARS="ADS_MODE=${ADS_MODE}"
 fi
@@ -420,12 +480,18 @@ if [ "$PROXY_ENV" == "ssh" ]; then
         echo -e "  ${CYAN}OpenVPN ${GREEN}GET /saeka-ovpn HTTP/1.1[crlf]Host: ${CLEAN_HOST}[crlf]Upgrade: websocket[crlf][crlf]${RESET}"
         echo -e "  ${CYAN}        ${GREEN}/saeka-ovpn -> ${OVPN_HOST}:${OVPN_PORT}${RESET}"
     fi
+    if [ -n "$OVPN_PROFILE_B64" ] && [ -n "$SSH_USERS_CSV" ]; then
+        echo -e "  ${CYAN}Profile ${GREEN}https://${CLEAN_HOST}/cert${CYAN}  (login: one of the users above)${RESET}"
+    fi
 elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     echo -e "  ${CYAN}                  OVPN RELAY${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
     echo -e "  ${CYAN}Forwards /saeka-ovpn to ${GREEN}${OVPN_HOST}:${OVPN_PORT}${RESET}"
     echo -e "  ${CYAN}Host    ${GREEN}${CLEAN_HOST}${CYAN}   Port ${GREEN}443 (TLS/SNI)${RESET}"
     echo -e "  ${CYAN}Payload ${GREEN}GET /saeka-ovpn HTTP/1.1[crlf]Host: ${CLEAN_HOST}[crlf]Upgrade: websocket[crlf][crlf]${RESET}"
+    if [ -n "$OVPN_PROFILE_B64" ]; then
+        echo -e "  ${CYAN}Profile ${GREEN}https://${CLEAN_HOST}/cert${CYAN}  (login: the /cert user you set)${RESET}"
+    fi
 else
     echo -e "  ${CYAN}                    PATHS & PROTOCOLS${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"

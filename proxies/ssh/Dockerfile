@@ -1,6 +1,8 @@
 # docker build -f proxies/ssh/Dockerfile -t IMAGE .
 # nginx :8080 -> ws_bridge :2222 -> Dropbear :2200 (user/password)
 # badvpn-udpgw :7300 carries UDP through the SSH tunnel.
+# Optional: /saeka-ovpn -> ws_bridge :2223 -> OpenVPN VM (OVPN_UPSTREAM_HOST)
+# Optional: /cert -> cert_server :2224 (login = SSH_USERS) serves the .ovpn
 FROM debian:bookworm-slim
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -21,7 +23,8 @@ RUN mkdir -p /etc/dropbear \
 
 COPY proxies/ssh/banner.txt /etc/dropbear/banner.txt
 COPY proxies/ssh/nginx.conf /etc/nginx/nginx.conf
-COPY proxies/ssh/ws_bridge.py /opt/ws_bridge.py
+COPY proxies/common/ws_bridge.py /opt/ws_bridge.py
+COPY proxies/common/cert_server.py /opt/cert_server.py
 COPY proxies/ssh/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

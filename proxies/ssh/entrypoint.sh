@@ -1,105 +1,89 @@
 #!/bin/bash
-set -euo pipefail
-ulimit -n 65535 2>/dev/null || true
+set -e
+ulimit -n 65535 || true
 
-UDPGW_PORT="${UDPGW_PORT:-7300}"
-SSH_USERS="${SSH_USERS:-}"   # "user1:pass1,user2:pass2"
+# Env:
+#   SSH_USERS          "user1:pass1,user2:pass2" (random one-off account if unset)
+#   OVPN_UPSTREAM_HOST VM IP/host running OpenVPN (optional; enables /saeka-ovpn)
+#   OVPN_UPSTREAM_PORT default 1194 (server must be proto tcp)
+#   OVPN_PROFILE_B64   client .ovpn, base64 (optional; enables /cert)
+OVPN_UPSTREAM_HOST="${OVPN_UPSTREAM_HOST:-}"
+OVPN_UPSTREAM_PORT="${OVPN_UPSTREAM_PORT:-1194}"
 
-# No users supplied: create one random account and print it to the logs
-if [ -z "$SSH_USERS" ]; then
-    gen_pass="$(python3 -c 'import secrets,string; a=string.ascii_letters+string.digits; print("".join(secrets.choice(a) for _ in range(16)))')"
-    SSH_USERS="saeka:${gen_pass}"
-    echo "[!] SSH_USERS not set - generated one-off account  saeka / ${gen_pass}"
+# ---- SSH accounts (tunnel-only, /bin/false shell) ---------------------------
+if [ -z "${SSH_USERS:-}" ]; then
+    RANDPW=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c16 || true)
+    SSH_USERS="saeka:${RANDPW}"
+    echo "[+] SSH_USERS not set - generated one-off account saeka:${RANDPW} (won't persist across redeploys)"
+    export SSH_USERS          # so /cert can use it too
 fi
-
-created=0
-IFS=',' read -r -a entries <<< "$SSH_USERS"
-for entry in "${entries[@]}"; do
-    name="${entry%%:*}"
-    pass="${entry#*:}"
-    if [ "$name" = "$entry" ] || [ -z "$pass" ] || ! [[ "$name" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
-        echo "[!] skipping invalid SSH_USERS entry (expected name:password, name = a-z 0-9 _ -)" >&2
-        continue
+IFS=',' read -ra PAIRS <<< "$SSH_USERS"
+for pair in "${PAIRS[@]}"; do
+    user="${pair%%:*}"
+    pass="${pair#*:}"
+    [ -z "$user" ] && continue
+    if ! [[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        echo "[!] Skipping invalid username '${user}'"; continue
     fi
-    uid="$(id -u "$name" 2>/dev/null || true)"
-    if [ -n "$uid" ] && [ "$uid" -lt 1000 ]; then
-        echo "[!] skipping '$name': system account" >&2
-        continue
+    if [ -z "$pass" ] || [ "$pass" = "$pair" ]; then
+        echo "[!] Skipping '${user}' - no password (format user:pass)"; continue
     fi
-    if [ -z "$uid" ]; then
-        useradd -m -s /bin/false "$name"
-    fi
-    printf '%s:%s\n' "$name" "$pass" | chpasswd
-    created=$((created + 1))
-    echo "[+] user ready: ${name}"
+    id -u "$user" >/dev/null 2>&1 || useradd -m -s /bin/false "$user"
+    echo "${user}:${pass}" | chpasswd
+    echo "[+] SSH account ready: $user"
 done
-if [ "$created" -eq 0 ]; then
-    echo "[!] no valid users - refusing to start" >&2
-    exit 1
-fi
 
-# Optional: also relay /saeka-ovpn to a real OpenVPN server (proto tcp) on a VM
-OVPN_HOST="${OVPN_UPSTREAM_HOST:-}"
-OVPN_PORT="${OVPN_UPSTREAM_PORT:-1194}"
-if [ -n "$OVPN_HOST" ]; then
-    if ! [[ "$OVPN_HOST" =~ ^[A-Za-z0-9.-]+$ ]]; then
-        echo "[!] OVPN_UPSTREAM_HOST is not a valid IP or hostname" >&2
-        exit 1
-    fi
-    if ! [[ "$OVPN_PORT" =~ ^[0-9]+$ ]] || [ "$OVPN_PORT" -lt 1 ] || [ "$OVPN_PORT" -gt 65535 ]; then
-        echo "[!] OVPN_UPSTREAM_PORT must be 1-65535" >&2
-        exit 1
-    fi
-fi
-
-# Host keys (RSA + ECDSA + ED25519 so old and new clients can all connect)
-mkdir -p /etc/dropbear
-[ -s /etc/dropbear/dropbear_rsa_host_key ]     || dropbearkey -t rsa -s 2048 -f /etc/dropbear/dropbear_rsa_host_key >/dev/null
-[ -s /etc/dropbear/dropbear_ecdsa_host_key ]   || dropbearkey -t ecdsa -s 256 -f /etc/dropbear/dropbear_ecdsa_host_key >/dev/null
-[ -s /etc/dropbear/dropbear_ed25519_host_key ] || dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null
-
-pids=()
-cleanup() {
-    trap - EXIT
-    kill "${pids[@]}" 2>/dev/null || true
-    wait 2>/dev/null || true
+start_dropbear() {
+    dropbear -F -E -R -w -K 60 -p 127.0.0.1:2200 -b /etc/dropbear/banner.txt &
+    DROPBEAR_PID=$!
 }
-trap cleanup EXIT
-trap 'exit 143' TERM INT
+start_udpgw() {
+    badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000 \
+        --max-connections-for-client 40 --loglevel warning &
+    UDPGW_PID=$!
+}
+start_ssh_bridge() {
+    python3 /opt/ws_bridge.py 2222 127.0.0.1 2200 ssh &
+    SSH_BRIDGE_PID=$!
+}
+start_ovpn_bridge() {
+    python3 /opt/ws_bridge.py 2223 "$OVPN_UPSTREAM_HOST" "$OVPN_UPSTREAM_PORT" ovpn &
+    OVPN_BRIDGE_PID=$!
+}
+start_cert() {
+    python3 /opt/cert_server.py &
+    CERT_PID=$!
+}
 
-# UDP over SSH: clients forward to 127.0.0.1:${UDPGW_PORT} through the tunnel
-badvpn-udpgw \
-    --listen-addr "127.0.0.1:${UDPGW_PORT}" \
-    --max-clients 1000 \
-    --max-connections-for-client 500 \
-    --loglevel 2 &
-pids+=($!)
+echo "[+] Starting Dropbear on 127.0.0.1:2200..."
+start_dropbear
+echo "[+] Starting BadVPN UDPGW on 127.0.0.1:7300..."
+start_udpgw
+echo "[+] /saeka-ssh -> Dropbear"
+start_ssh_bridge
 
-# SSH server: password login, no root, no remote forwarding
-dropbear -F -E -w -k -m \
-    -p 127.0.0.1:2200 \
-    -r /etc/dropbear/dropbear_rsa_host_key \
-    -r /etc/dropbear/dropbear_ecdsa_host_key \
-    -r /etc/dropbear/dropbear_ed25519_host_key \
-    -K 30 -W 65536 \
-    -b /etc/dropbear/banner.txt &
-pids+=($!)
-
-BRIDGE_LISTEN_PORT=2222 BRIDGE_TARGET_HOST=127.0.0.1 BRIDGE_TARGET_PORT=2200 \
-    python3 /opt/ws_bridge.py &
-pids+=($!)
-
-if [ -n "$OVPN_HOST" ]; then
-    echo "[+] Relaying /saeka-ovpn -> ${OVPN_HOST}:${OVPN_PORT}"
-    BRIDGE_LISTEN_PORT=2223 BRIDGE_TARGET_HOST="$OVPN_HOST" BRIDGE_TARGET_PORT="$OVPN_PORT" \
-        python3 /opt/ws_bridge.py &
-    pids+=($!)
+OVPN_BRIDGE_PID=""
+if [ -n "$OVPN_UPSTREAM_HOST" ]; then
+    echo "[+] /saeka-ovpn -> ${OVPN_UPSTREAM_HOST}:${OVPN_UPSTREAM_PORT}"
+    start_ovpn_bridge
+else
+    echo "[!] OVPN_UPSTREAM_HOST not set - /saeka-ovpn disabled (SSH unaffected)."
 fi
+start_cert
 
-nginx -g 'daemon off;' &
-pids+=($!)
+echo "[+] Starting watchdog..."
+(
+  while true; do
+    sleep 10
+    kill -0 "$DROPBEAR_PID"    2>/dev/null || { echo "[watchdog] dropbear died";    start_dropbear; }
+    kill -0 "$UDPGW_PID"       2>/dev/null || { echo "[watchdog] udpgw died";        start_udpgw; }
+    kill -0 "$SSH_BRIDGE_PID"  2>/dev/null || { echo "[watchdog] ssh bridge died";   start_ssh_bridge; }
+    kill -0 "$CERT_PID"        2>/dev/null || { echo "[watchdog] cert server died";  start_cert; }
+    if [ -n "$OVPN_BRIDGE_PID" ]; then
+        kill -0 "$OVPN_BRIDGE_PID" 2>/dev/null || { echo "[watchdog] ovpn bridge died"; start_ovpn_bridge; }
+    fi
+  done
+) &
 
-# If any service dies, exit so Cloud Run starts a fresh instance
-wait -n || true
-echo "[!] a service exited - shutting down" >&2
-exit 1
+echo "[+] Starting nginx..."
+exec nginx -g "daemon off;"
