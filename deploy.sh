@@ -172,8 +172,8 @@ echo -e "  ${YELLOW}3) Caddy      - full protocol support incl. gRPC (fast & sta
 echo -e "  ${YELLOW}4) H2O        - full protocol support incl. gRPC${RESET}"
 echo -e "  ${YELLOW}5) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
 echo -e "  ${YELLOW}6) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
-echo -e "  ${YELLOW}7) SSH Gateway - standalone SSH-over-WS (+ UDPGW), not the VLESS/etc stack${RESET}"
-echo -e "  ${YELLOW}8) OVPN Relay  - standalone WS relay to a REAL OpenVPN server on a VM${RESET}"
+echo -e "  ${YELLOW}7) SSH        - standalone SSH-over-WS (+ UDPGW), not the VLESS/etc stack${RESET}"
+echo -e "  ${YELLOW}8) OVPN       - standalone WS relay to a REAL OpenVPN server on a VM${RESET}"
 echo ""
 read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-8] (Default 1): ${RESET}")" ENGINE_CHOICE
 
