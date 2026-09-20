@@ -13,6 +13,15 @@ OpenVPN logins: the same "user:pass,user2:pass2" list you give deploy.sh
 to the VM. Clients then need BOTH the client certificate (inside the .ovpn) and
 a login. Leave it blank for certificate-only auth.
 NOTE: the Cloud Run relay (/saeka-ovpn) needs OpenVPN on proto TCP.
+
+Non-interactive mode: pass --auto (or set DEPLOY_VM_AUTO=1) to skip every
+prompt. Text/number prompts use their default unless you set the matching
+DEPLOY_VM_<LABEL> env var (e.g. DEPLOY_VM_GCE_ZONE, DEPLOY_VM_VM_NAME,
+DEPLOY_VM_MACHINE_TYPE). The three protocol toggles use fixed names instead:
+DEPLOY_VM_ENABLE_REALITY, DEPLOY_VM_ENABLE_OVPN, DEPLOY_VM_ENABLE_SSH (each
+"y"/"n", default "y"). OpenVPN logins come from OVPN_USERS (or SSH_USERS,
+same as before) and the Cloudflare token still comes from CF_API_TOKEN. The
+external IP is always auto-reserved via gcloud - it was never typed by hand.
 """
 from __future__ import annotations
 import getpass
@@ -35,6 +44,11 @@ YELLOW = "\033[1;33m"
 
 WORKDIR = Path.home() / ".deploy_vm"
 PBKDF2_ITER = 200_000   # must match the auth script inside STARTUP
+
+# Non-interactive mode: set --auto on the command line, or DEPLOY_VM_AUTO=1
+# in the environment. Every prompt below then falls back to its default (or
+# to the matching DEPLOY_VM_* env var, if set) instead of asking.
+AUTO = "--auto" in sys.argv or os.environ.get("DEPLOY_VM_AUTO", "") == "1"
 
 def colour(text: str, code: str) -> str:
     return f"{code}{text}{RESET}"
@@ -64,14 +78,34 @@ def gcloud_json(args: list[str]) -> dict | None:
     except json.JSONDecodeError:
         return None
 
-def ask(label: str, default: str | None = None) -> str:
+def _env_key(label: str) -> str:
+    # "GCE zone" -> "DEPLOY_VM_GCE_ZONE"
+    return "DEPLOY_VM_" + re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_").upper()
+
+def ask(label: str, default: str | None = None, env_var: str | None = None) -> str:
+    if AUTO:
+        value = os.environ.get(env_var or _env_key(label), "")
+        chosen = value or (default or "")
+        print(colour(f"  {label}: {chosen}", CYAN))
+        return chosen
     suffix = f" [{default}]" if default is not None else ""
     value = input(colour(f"  {label}{suffix}: ", CYAN)).strip()
     return value or (default or "")
 
-def ask_yes_no(label: str, default: bool = True) -> bool:
+def ask_yes_no(label: str, default: bool = True, env_var: str | None = None) -> bool:
+    if AUTO:
+        env = os.environ.get(env_var or _env_key(label), "")
+        chosen = default if not env else env.strip().lower().startswith("y")
+        print(colour(f"  {label}: {'yes' if chosen else 'no'}", CYAN))
+        return chosen
     answer = input(colour(f"  {label} ({'Y/n' if default else 'y/N'}): ", CYAN)).strip().lower()
     return default if not answer else answer.startswith("y")
+
+def ask_secret(label: str, env_var: str) -> str:
+    """Like getpass, but in --auto mode reads from env_var instead of prompting."""
+    if AUTO:
+        return os.environ.get(env_var, "")
+    return getpass.getpass(f"  {label}: ").strip()
 
 def project() -> str:
     value = cmd(["gcloud", "config", "get-value", "project"], capture=True).stdout.strip()
@@ -464,9 +498,9 @@ def main() -> None:
     machine = ask("Machine type", "e2-micro")
     tag = f"{name}-tcp"
 
-    reality = ask_yes_no("Enable VLESS + REALITY on raw TCP?", True)
-    ovpn = ask_yes_no("Enable OpenVPN?", True)
-    ssh_tunnel = ask_yes_no("Enable restricted SSH SOCKS tunnel?", True)
+    reality = ask_yes_no("Enable VLESS + REALITY on raw TCP?", True, env_var="DEPLOY_VM_ENABLE_REALITY")
+    ovpn = ask_yes_no("Enable OpenVPN?", True, env_var="DEPLOY_VM_ENABLE_OVPN")
+    ssh_tunnel = ask_yes_no("Enable restricted SSH SOCKS tunnel?", True, env_var="DEPLOY_VM_ENABLE_SSH")
 
     if not (reality or ovpn or ssh_tunnel):
         die("select at least one protocol")
@@ -479,15 +513,16 @@ def main() -> None:
     oproto = "udp"
     users_hash = ""
     if ovpn:
-        oproto = ask("OpenVPN protocol (udp/tcp; tcp is REQUIRED for the Cloud Run relay)", "udp").lower()
+        oproto = ask("OpenVPN protocol (udp/tcp; tcp is REQUIRED for the Cloud Run relay)", "udp",
+                     env_var="DEPLOY_VM_OVPN_PROTO").lower()
         if oproto not in {"udp", "tcp"}:
             die("OpenVPN protocol must be udp or tcp")
         raw_users = os.environ.get("SSH_USERS", "")
         if raw_users:
             print(colour("  Using logins from the SSH_USERS environment variable.", YELLOW))
         else:
-            raw_users = getpass.getpass(
-                "  OpenVPN logins user:pass,user2:pass2 (blank = certificate only): ").strip()
+            raw_users = ask_secret(
+                "OpenVPN logins user:pass,user2:pass2 (blank = certificate only)", "OVPN_USERS")
         users_hash = hash_users(raw_users) if raw_users else ""
         if not users_hash:
             print(colour("  No logins: anyone holding the .ovpn file can connect.", YELLOW))
@@ -530,12 +565,27 @@ def main() -> None:
     fqdn = None
     if domain:
         subdomain = ask("VM subdomain", "vpn")
-        token = os.environ.get("CF_API_TOKEN") or getpass.getpass("Cloudflare DNS API token (blank to skip): ")
+        token = os.environ.get("CF_API_TOKEN") or ask_secret("Cloudflare DNS API token (blank to skip)", "CF_API_TOKEN")
         if token:
             fqdn = cloudflare(domain, subdomain, ip, token)
 
     host = fqdn or ip
     print(colour(f"\nVM ready: {host} (static IP {ip})", GREEN))
+
+    # Written so deploy.sh's SSH Gateway (7) / OVPN Relay (8) options can pick
+    # up the host/port automatically instead of asking you to type them.
+    info_path = WORKDIR / f"{name}-info.json"
+    info_path.write_text(json.dumps({
+        "vm_name": name,
+        "host": host,
+        "ip": ip,
+        "ovpn_enabled": bool(ovpn),
+        "ovpn_port": oport if ovpn else None,
+        "ovpn_proto": oproto if ovpn else None,
+        "ssh_tunnel_enabled": bool(ssh_tunnel),
+        "updated": time.time(),
+    }, indent=2))
+    info_path.chmod(0o600)
 
     if result.get("reality", {}).get("enabled"):
         r = result["reality"]
