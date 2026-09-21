@@ -117,16 +117,13 @@ render_gate_screen() {
 }
 
 ALLOWED_HASHES=(
-    "2c443ca329d2d85d093b80349ee88cc23169eaec1698dea050920836773fb7ad"
-    "718052c0d0866bb03f23d3d4f2488f2aa86c435b9fd658abecbfc4c7abf2de47"
-    "57141b782821c05da2e2bcb1e2fa1253bce1a817c0d14f79bc899e1171ad7bb0"
-    ""  # slot 4 - paste a hash here, or leave blank to keep this slot unused
-    ""  # slot 5
-    ""  # slot 6
-    ""  # slot 7
-    ""  # slot 8
-    ""  # slot 9
-    ""  # slot 10
+    "0b66f826027e8dea214f71a97027e229e1864495b6b68bb85a4581d961593ae2"
+    "60bf5dbefecdc1c5b827d015ff86ff7dd1d6bb41e9c4e3c3f138f53f922d4ae2"
+    "4e6db46a3889c48bd9c6e70f13d82cce9e1ef0875d12ecb746cfc46ce323d441"
+    "0380c4e10a286bb68d7dee7172a04fe15a3a7a2144799f6a5a7bf5eb6789b7c2"
+    "1c952ddd6c291a19b4db15a7bb285c52641f053bdb6cecdd8e795cf50b9d99a2"
+    "a0e229c0e3e1a780fa53c5917a6c8d2ee25d0f3a2ce5f40f7e82a3c857d96eee"
+    "0e687116b4a90a2a872e2f064b8688c9a26df2ac82e3bbc7ed55ba2fdc858342"
 )
 MAX_ATTEMPTS=3
 authorized=0
