@@ -93,7 +93,7 @@ GREETING="${GREET_OPEN[$(( GREET_IDX / 10 ))]} ${GREET_CLOSE[$(( GREET_IDX % 10 
 render_gate_screen() {
     clear
     echo ""
-    center_line "4N1 FAST DEPLOYER v2" "${BOLD}${WHITE}"
+    center_line "SAEKA FAST DEPLOYER" "${BOLD}${WHITE}"
     center_line "engineered by saeka tojirp" "${MAGENTA}"
     echo ""
     box_top
@@ -167,7 +167,7 @@ echo ""
 center_line "ACCESS GRANTED" "${BOLD}${GREEN}"
 echo ""
 
-echo -e "  ${BOLD}${WHITE}4N1 FAST DEPLOYER v2 (PER-ENGINE)${RESET}"
+echo -e "  ${BOLD}${WHITE}SAEKA FAST DEPLOYER${RESET}"
 echo -e "  ${MAGENTA}ENGINEERED BY SAEKA TOJIRP${RESET}"
 echo ""
 
