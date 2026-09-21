@@ -1,68 +1,147 @@
 #!/usr/bin/env python3
-"""Fake-WebSocket handshake, then raw byte relay.
+"""HTTP Upgrade to raw TCP bridge used by SSH/OpenVPN relays.
 
-usage: ws_bridge.py LISTEN_PORT UPSTREAM_HOST UPSTREAM_PORT NAME
-
-Deliberately NOT real RFC6455: it answers with a canned "101 Switching
-Protocols" without validating the request, then relays raw bytes with no
-frame headers. That is what HTTP Injector / NPV-Tunnel style clients expect;
-a strict RFC6455 bridge would not interoperate with them.
+This is intentionally not RFC6455 WebSocket framing.  HTTP Injector/NPV style
+clients expect a 101 response followed by an unmodified byte stream.
 """
-import socket, sys, threading
+import argparse
+import asyncio
+import base64
+import hashlib
+import logging
+import os
 
-LISTEN_PORT = int(sys.argv[1])
-UP_HOST     = sys.argv[2]
-UP_PORT     = int(sys.argv[3])
-NAME        = sys.argv[4]
-BUF_SIZE    = 65536
-RESPONSE = (b"HTTP/1.1 101 Switching Protocols\r\n"
-            b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s ws_bridge %(message)s")
+log = logging.getLogger("ws_bridge")
 
-def tune_socket(sock):
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
-    except OSError:
-        pass
+GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+MAX_HEAD = 65536
+BUF = 65536
 
-def bridge(src, dst):
+
+def tune(writer):
+    sock = writer.get_extra_info("socket")
+    if sock is not None:
+        try:
+            sock.setsockopt(6, 1, 1)  # IPPROTO_TCP/TCP_NODELAY
+            sock.setsockopt(1, 9, 1)  # SOL_SOCKET/SO_KEEPALIVE
+        except OSError:
+            pass
+
+
+def response(key):
+    out = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+    if key:
+        digest = hashlib.sha1((key + GUID).encode("ascii")).digest()
+        out += b"Sec-WebSocket-Accept: " + base64.b64encode(digest) + b"\r\n"
+    return out + b"\r\n"
+
+
+async def read_head(reader):
+    data = bytearray()
+    while b"\r\n\r\n" not in data:
+        chunk = await asyncio.wait_for(reader.read(4096), timeout=30)
+        if not chunk:
+            break
+        data.extend(chunk)
+        if len(data) > MAX_HEAD:
+            raise ConnectionError("request headers too large")
+    return bytes(data)
+
+
+def headers(head):
+    result = {}
+    for line in head.decode("latin-1").split("\r\n"):
+        if ":" in line:
+            key, value = line.split(":", 1)
+            result[key.strip().lower()] = value.strip()
+    return result
+
+
+async def pipe(source, target):
     try:
         while True:
-            data = src.recv(BUF_SIZE)
+            data = await source.read(BUF)
             if not data:
-                break
-            dst.sendall(data)
-    except Exception:
-        pass
+                return
+            target.write(data)
+            await target.drain()
+    except (asyncio.CancelledError, ConnectionError, OSError):
+        return
     finally:
-        for s in (src, dst):
-            try: s.close()
-            except Exception: pass
+        try:
+            target.close()
+        except Exception:
+            pass
 
-def handle(client):
+
+async def handle(client, target_host, target_port):
+    peer = client.get_extra_info("peername")
     try:
-        tune_socket(client)
-        client.settimeout(10)
-        client.recv(4096)                 # the client's upgrade request
-        client.settimeout(None)
-        client.sendall(RESPONSE)
-        up = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        tune_socket(up)
-        up.settimeout(10)
-        up.connect((UP_HOST, UP_PORT))
-        up.settimeout(None)
-        threading.Thread(target=bridge, args=(client, up), daemon=True).start()
-        threading.Thread(target=bridge, args=(up, client), daemon=True).start()
-    except Exception as e:
-        print(f"[bridge:{NAME}] upstream connect failed: {e}", flush=True)
-        try: client.close()
-        except Exception: pass
+        tune(client)
+        head = await read_head(client)
+        if not head:
+            client.close()
+            return
+        hdrs = headers(head)
+        if "upgrade" not in hdrs:
+            client.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            await client.drain()
+            client.close()
+            return
+        upstream_reader, upstream = await asyncio.wait_for(
+            asyncio.open_connection(target_host, target_port), timeout=10
+        )
+        tune(upstream)
+        client.write(response(hdrs.get("sec-websocket-key", "")))
+        await client.drain()
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind(('127.0.0.1', LISTEN_PORT))
-server.listen(200)
-while True:
-    c, _ = server.accept()
-    threading.Thread(target=handle, args=(c,), daemon=True).start()
+        tasks = [
+            asyncio.create_task(pipe(client, upstream)),
+            asyncio.create_task(pipe(upstream_reader, client)),
+        ]
+        _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    except (asyncio.TimeoutError, ConnectionError, OSError) as exc:
+        log.warning("%s: %s", peer, exc)
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+async def serve(listen_host, listen_port, target_host, target_port):
+    server = await asyncio.start_server(
+        lambda r, w: handle(w, target_host, target_port),
+        listen_host, listen_port, limit=BUF, backlog=1024,
+    )
+    log.info("listening on %s:%s -> %s:%s", listen_host, listen_port, target_host, target_port)
+    async with server:
+        await server.serve_forever()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("listen", nargs="?")
+    parser.add_argument("target_host", nargs="?")
+    parser.add_argument("target_port", nargs="?")
+    parser.add_argument("name", nargs="?", default="bridge")
+    parser.add_argument("--listen", dest="listen_opt")
+    parser.add_argument("--target", dest="target_opt")
+    args = parser.parse_args()
+
+    listen = args.listen_opt or args.listen or os.environ.get("BRIDGE_LISTEN", "127.0.0.1:2222")
+    target = args.target_opt or (
+        f"{args.target_host}:{args.target_port}" if args.target_host and args.target_port else
+        f"{os.environ.get('BRIDGE_TARGET_HOST', '127.0.0.1')}:{os.environ.get('BRIDGE_TARGET_PORT', '2200')}"
+    )
+    listen_host, listen_port = listen.rsplit(":", 1)
+    target_host, target_port = target.rsplit(":", 1)
+    asyncio.run(serve(listen_host, int(listen_port), target_host, int(target_port)))
+
+
+if __name__ == "__main__":
+    main()
