@@ -606,7 +606,7 @@ def main() -> None:
         die("select at least one protocol")
 
     rport = ask_port("REALITY port", 443) if reality else 443
-    sni = ask("REALITY server name", "www.microsoft.com") if reality else "www.microsoft.com"
+    sni = ask("REALITY server name", "www.maya.ph") if reality else "www.maya.ph"
     dest = ask("REALITY destination host:port", f"{sni}:443") if reality else f"{sni}:443"
 
     rtransport = "xhttp"
