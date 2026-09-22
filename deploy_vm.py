@@ -50,7 +50,8 @@ from pathlib import Path
 
 BOLD = "\033[1m"; RESET = "\033[0m"
 GREEN = "\033[1;32m"; RED = "\033[1;31m"; CYAN = "\033[1;36m"
-YELLOW = "\033[1;33m"
+YELLOW = "\033[1;33m"; MAGENTA = "\033[1;35m"; WHITE = "\033[1;37m"
+DIM = "\033[2m"
 
 WORKDIR = Path.home() / ".deploy_vm"
 PBKDF2_ITER = 200_000   # must match the auth script inside STARTUP
@@ -181,34 +182,92 @@ def startup(config: dict) -> str:
         .replace("@@PUBKEY@@", values["pubkey"])\
         .replace("@@USERS@@", values["users"])
 
-def create_vm(project_id: str, zone: str, name: str, machine: str, ip: str, tag: str, script: Path) -> None:
+def create_vm(project_id: str, zone: str, name: str, machine: str, ip: str, tag: str, script: Path) -> bool:
+    """Returns True if a brand-new VM was created, False if an existing one was reused."""
     if gcloud_json(["compute", "instances", "describe", name, "--zone", zone, "--project", project_id]):
         print(colour(f"  Reusing existing VM {name}; delete it for a clean rebuild.", YELLOW))
-        return
+        return False
     cmd(["gcloud", "compute", "instances", "create", name, "--project", project_id,
          "--zone", zone, "--machine-type", machine, "--image-family=debian-12",
          "--image-project=debian-cloud", "--address", ip, "--tags", tag,
          f"--metadata-from-file=startup-script={script}"])
+    return True
 
 def ssh(project_id: str, zone: str, name: str, remote: str) -> subprocess.CompletedProcess[str]:
     return cmd(["gcloud", "compute", "ssh", name, "--project", project_id, "--zone", zone,
                 "--tunnel-through-iap", "--quiet", "--command", remote], capture=True, check=False)
 
+def serial_log_tail(project_id: str, zone: str, name: str, lines: int = 12) -> list[str]:
+    """Best-effort tail of the startup-script log via the serial console.
+
+    This works even before sshd is up, which is exactly the window where
+    "stuck waiting" complaints come from - so it's the first thing we show
+    instead of a bare spinner.
+    """
+    result = cmd(["gcloud", "compute", "instances", "get-serial-port-output", name,
+                  "--project", project_id, "--zone", zone, "--port", "1"],
+                 capture=True, check=False)
+    if result.returncode or not result.stdout:
+        return []
+    relevant = [ln.rstrip() for ln in result.stdout.splitlines()
+                if "vm-setup" in ln or ln.strip().startswith("===") or "WARNING" in ln or "ERROR" in ln]
+    return (relevant or result.stdout.splitlines())[-lines:]
+
 def wait_ready(project_id: str, zone: str, name: str, timeout: int = 900) -> dict:
     end = time.time() + timeout
+    started = time.time()
+    last_reason = ""
+    last_log_print = 0.0
+    print(colour(f"\n  Waiting for {name} to finish provisioning (timeout {timeout}s)...", CYAN))
     while time.time() < end:
+        elapsed = int(time.time() - started)
         result = ssh(project_id, zone, name, "sudo cat /etc/vm-setup-complete.json 2>/dev/null")
-        if result.returncode == 0:
+        if result.returncode == 0 and result.stdout.strip():
             try:
                 data = json.loads(result.stdout.strip())
                 if data.get("status") == "ready":
+                    print(colour(f"  [{elapsed:>4}s] VM reports ready.                              ", GREEN))
                     return data
             except json.JSONDecodeError:
-                pass
-        print("\r  Waiting for VM startup configuration...", end="", flush=True)
+                last_reason = "setup-complete file exists but isn't valid JSON yet"
+        elif result.returncode != 0:
+            stderr = (result.stderr or "").strip().splitlines()
+            last_reason = stderr[-1] if stderr else "SSH not answering yet (VM likely still booting)"
+
+        # Every ~30s, pull a few lines of the real startup-script log instead
+        # of leaving the person staring at a silent spinner.
+        if time.time() - last_log_print >= 30:
+            last_log_print = time.time()
+            tail = serial_log_tail(project_id, zone, name)
+            status_line = f"  [{elapsed:>4}s] {last_reason or 'booting'}"
+            print(colour(status_line, YELLOW))
+            if tail:
+                print(colour("  --- startup-script log (tail) ---", DIM))
+                for ln in tail:
+                    print(colour(f"    {ln}", DIM))
+                print(colour("  ----------------------------------", DIM))
+        else:
+            print(f"\r  [{elapsed:>4}s] waiting...", end="", flush=True)
         time.sleep(10)
+
     print()
-    die(f"VM setup timed out; inspect with: gcloud compute ssh {name} --zone {zone} --tunnel-through-iap")
+    print(colour(f"  TIMED OUT after {timeout}s waiting on {name}.", RED))
+    tail = serial_log_tail(project_id, zone, name, lines=40)
+    if tail:
+        print(colour("  Last startup-script log lines:", YELLOW))
+        for ln in tail:
+            print(colour(f"    {ln}", WHITE))
+    else:
+        print(colour("  Could not read the serial console either - check IAM permissions", YELLOW))
+        print(colour("  (roles/compute.viewer or better) for 'gcloud compute instances get-serial-port-output'.", YELLOW))
+    die(
+        "VM setup timed out. Inspect it directly with:\n"
+        f"    gcloud compute instances get-serial-port-output {name} --zone {zone} --project {project_id}\n"
+        f"    gcloud compute ssh {name} --project {project_id} --zone {zone} --tunnel-through-iap\n"
+        "  Common causes: a firewall/org-policy blocking IAP (tcp/22 from 35.235.240.0/20),\n"
+        "  apt-get failing mid-provision, or Xray/OpenVPN crashing right after install\n"
+        "  (both log to /var/log/vm-setup.log on the VM, shown above when readable)."
+    )
 
 def scp(project_id: str, zone: str, name: str, remote: str, local: Path) -> bool:
     staged = "/tmp/client1.ovpn"
@@ -606,8 +665,10 @@ def main() -> None:
         die("select at least one protocol")
 
     rport = ask_port("REALITY port", 443) if reality else 443
-    sni = ask("REALITY server name", "www.maya.ph") if reality else "www.maya.ph"
-    dest = ask("REALITY destination host:port", f"{sni}:443") if reality else f"{sni}:443"
+    sni = ask("REALITY server name (SNI to impersonate)", "www.maya.ph",
+              env_var="DEPLOY_VM_REALITY_SNI") if reality else "www.maya.ph"
+    dest = ask("REALITY destination host:port (real TLS site the handshake is stolen from)",
+               f"{sni}:443", env_var="DEPLOY_VM_REALITY_DEST") if reality else f"{sni}:443"
 
     rtransport = "xhttp"
     xpath = "/xh-saeka"
@@ -694,7 +755,11 @@ def main() -> None:
     script_path.write_text(startup(cfg))
     script_path.chmod(0o700)
 
-    create_vm(project_id, zone, name, machine, ip, tag, script_path)
+    is_new = create_vm(project_id, zone, name, machine, ip, tag, script_path)
+    if is_new:
+        print(colour(f"  VM {name} created; the startup script now runs unattended on first boot.", CYAN))
+    else:
+        print(colour(f"  Skipping straight to the readiness check for the existing VM.", CYAN))
     result = wait_ready(project_id, zone, name)
 
     reality_info = result.get("reality", {"enabled": False})
