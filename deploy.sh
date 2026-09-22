@@ -93,7 +93,7 @@ GREETING="${GREET_OPEN[$(( GREET_IDX / 10 ))]} ${GREET_CLOSE[$(( GREET_IDX % 10 
 render_gate_screen() {
     clear
     echo ""
-    center_line "SAEKA FAST DEPLOYER" "${BOLD}${WHITE}"
+    center_line "4N1 FAST DEPLOYER v2" "${BOLD}${WHITE}"
     center_line "engineered by saeka tojirp" "${MAGENTA}"
     echo ""
     box_top
@@ -167,7 +167,7 @@ echo ""
 center_line "ACCESS GRANTED" "${BOLD}${GREEN}"
 echo ""
 
-echo -e "  ${BOLD}${WHITE}SAEKA FAST DEPLOYER${RESET}"
+echo -e "  ${BOLD}${WHITE}4N1 FAST DEPLOYER v2 (PER-ENGINE)${RESET}"
 echo -e "  ${MAGENTA}ENGINEERED BY SAEKA TOJIRP${RESET}"
 echo ""
 
@@ -223,6 +223,51 @@ if [ "$PROXY_ENV" == "openresty" ]; then
     echo -e "  ${YELLOW}engine if you need those transports.${RESET}"
 fi
 echo ""
+
+# ------------------------------------------------------------------------
+# Optional SSH banner edit (ssh / reality engines only, both ship dropbear).
+# Must happen BEFORE the docker build below - banner.txt is COPY'd into the
+# image, so editing it after the build wouldn't do anything.
+# ------------------------------------------------------------------------
+if [ "$PROXY_ENV" == "ssh" ] || [ "$PROXY_ENV" == "reality" ]; then
+    BANNER_FILE="proxies/${PROXY_ENV}/banner.txt"
+    if [ -f "$BANNER_FILE" ]; then
+        echo -e "  ${CYAN}==================================================${RESET}"
+        echo -e "  ${GREEN}                 SSH BANNER${RESET}"
+        echo -e "  ${CYAN}==================================================${RESET}"
+        echo -e "  ${YELLOW}Shown to clients before SSH login (${BANNER_FILE}).${RESET}"
+        if [ "$AUTO" -eq 1 ]; then
+            EDIT_BANNER="${DEPLOY_EDIT_BANNER:-N}"
+            echo -e "  ${CYAN}Customize it now?${RESET} -> ${GREEN}${EDIT_BANNER}${RESET}"
+        else
+            read -r -p "$(echo -e "  ${CYAN}Customize it now? [y/N]: ${RESET}")" EDIT_BANNER
+        fi
+        if [[ "$EDIT_BANNER" =~ ^[Yy] ]]; then
+            EDITOR_BIN="${VISUAL:-${EDITOR:-nano}}"
+            if ! command -v "$EDITOR_BIN" >/dev/null 2>&1; then
+                echo -e "  ${RED}${EDITOR_BIN} not found on PATH - install it or set \$EDITOR - skipping.${RESET}"
+            elif [ ! -t 0 ]; then
+                echo -e "  ${YELLOW}No interactive terminal attached - skipping banner edit.${RESET}"
+            else
+                BANNER_HASH_BEFORE=$(sha256sum "$BANNER_FILE" | cut -d' ' -f1)
+                echo -e "  ${YELLOW}Opening in ${EDITOR_BIN} - save (Ctrl+O, Enter) then exit (Ctrl+X) when done.${RESET}"
+                # Runs in the foreground and blocks here; the moment nano exits
+                # after Ctrl+X *is* the save-detection - no polling needed.
+                "$EDITOR_BIN" "$BANNER_FILE" < /dev/tty > /dev/tty 2>&1 || true
+                BANNER_HASH_AFTER=$(sha256sum "$BANNER_FILE" | cut -d' ' -f1)
+                if [ "$BANNER_HASH_BEFORE" != "$BANNER_HASH_AFTER" ]; then
+                    echo -e "  ${GREEN}Banner saved - new contents:${RESET}"
+                else
+                    echo -e "  ${YELLOW}No changes detected - banner left as-is:${RESET}"
+                fi
+                echo -e "  ${CYAN}----------------------------------------${RESET}"
+                sed 's/^/  /' "$BANNER_FILE"
+                echo -e "  ${CYAN}----------------------------------------${RESET}"
+            fi
+        fi
+        echo ""
+    fi
+fi
 
 ADS_MODE="n/a"
 if [ "$STANDALONE" -eq 0 ]; then
@@ -642,9 +687,33 @@ prompt_reality_vm() {
         if [[ "$ovpn_yn" =~ ^[Nn] ]]; then
             ovpn_flag="n"
         fi
+
+        # REALITY steals its TLS handshake from a real, popular HTTPS site -
+        # that SNI/destination is what censors' DPI sees, so let it be chosen
+        # here instead of always defaulting to www.microsoft.com.
+        local reality_sni reality_dest
+        if [ "$AUTO" -eq 1 ]; then
+            reality_sni="${DEPLOY_VM_REALITY_SNI:-www.microsoft.com}"
+            echo -e "  ${CYAN}REALITY server name (SNI to impersonate)${RESET} -> ${GREEN}${reality_sni}${RESET}"
+        else
+            read -r -p "$(echo -e "  ${CYAN}REALITY server name / remote domain to impersonate [www.microsoft.com]: ${RESET}")" reality_sni
+            reality_sni="${reality_sni:-www.microsoft.com}"
+        fi
+        if ! [[ "$reality_sni" =~ ^[A-Za-z0-9.-]+$ ]]; then
+            echo -e "  ${RED}Invalid SNI/domain - falling back to www.microsoft.com.${RESET}"
+            reality_sni="www.microsoft.com"
+        fi
+        if [ "$AUTO" -eq 1 ]; then
+            reality_dest="${DEPLOY_VM_REALITY_DEST:-${reality_sni}:443}"
+            echo -e "  ${CYAN}REALITY destination host:port${RESET} -> ${GREEN}${reality_dest}${RESET}"
+        else
+            read -r -p "$(echo -e "  ${CYAN}REALITY destination host:port [${reality_sni}:443]: ${RESET}")" reality_dest
+            reality_dest="${reality_dest:-${reality_sni}:443}"
+        fi
+
         vm_name="${DEPLOY_VM_VM_NAME:-${SERVICE_NAME}-tcp}"
         zone="${DEPLOY_VM_GCE_ZONE:-$(pick_zone)}"
-        echo -e "  ${CYAN}Running deploy_vm.py --auto: ${vm_name} in ${zone} (REALITY+XHTTP, relay on, OpenVPN ${ovpn_flag})...${RESET}"
+        echo -e "  ${CYAN}Running deploy_vm.py --auto: ${vm_name} in ${zone} (REALITY+XHTTP sni=${reality_sni}, relay on, OpenVPN ${ovpn_flag})...${RESET}"
         if ! (
             cd "$SCRIPT_DIR"
             DEPLOY_VM_AUTO=1 \
@@ -652,6 +721,8 @@ prompt_reality_vm() {
             DEPLOY_VM_GCE_ZONE="$zone" \
             DEPLOY_VM_ENABLE_REALITY=y \
             DEPLOY_VM_REALITY_TRANSPORT=xhttp \
+            DEPLOY_VM_REALITY_SNI="$reality_sni" \
+            DEPLOY_VM_REALITY_DEST="$reality_dest" \
             DEPLOY_VM_ENABLE_RELAY=y \
             DEPLOY_VM_ENABLE_OVPN="$ovpn_flag" \
             DEPLOY_VM_ENABLE_SSH="${DEPLOY_VM_ENABLE_SSH:-n}" \
@@ -964,6 +1035,23 @@ if [ "$PROXY_ENV" == "openresty" ]; then
 fi
 echo ""
 
+# For the standalone engines (ssh / ovpn-relay / reality) this whole section
+# is opt-in: most people are happy leaving the *.run.app host as-is, so ask
+# a single yes/no up front instead of always dropping into the menu below.
+SKIP_DOMAIN_MENU=0
+if [ "$STANDALONE" -eq 1 ]; then
+    echo ""
+    if [ "$AUTO" -eq 1 ]; then
+        WANT_DOMAIN="${DEPLOY_WANT_DOMAIN:-N}"
+        echo -e "  ${CYAN}Put a custom domain in front of https://${CLEAN_HOST}?${RESET} -> ${GREEN}${WANT_DOMAIN}${RESET}"
+    else
+        read -r -p "$(echo -e "  ${CYAN}Put a custom domain (or self-signed cert) in front of https://${CLEAN_HOST}? [y/N]: ${RESET}")" WANT_DOMAIN
+    fi
+    [[ "$WANT_DOMAIN" =~ ^[Yy] ]] || SKIP_DOMAIN_MENU=1
+fi
+
+LB_INPUT=""
+if [ "$SKIP_DOMAIN_MENU" -eq 0 ]; then
 echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${GREEN}       CUSTOM DOMAIN & UNIVERSAL SNI MANAGER${RESET}"
 echo -e "  ${CYAN}==================================================${RESET}"
@@ -989,17 +1077,20 @@ else
 fi
 
 if [ -n "$LB_INPUT" ] && [ "$LB_INPUT" != "UNIVERSAL" ] && [ "$LB_INPUT" != "LOCAL" ]; then
-    echo -e "  ${CYAN}Checking that ${LB_INPUT} actually resolves before touching the LB...${RESET}"
+    echo -e "  ${CYAN}Checking ${LB_INPUT} (DNS, live TLS cert, Cloudflare proxying) before touching the LB...${RESET}"
     DOMAIN_UP=0
+    RESOLVES=""
+    HTTP_CODE="000"
     for _ in $(seq 1 3); do
         HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "https://${LB_INPUT}" 2>/dev/null || echo "000")
-        RESOLVES=$(getent ahostsv4 "$LB_INPUT" 2>/dev/null | head -n1)
+        RESOLVES=$(getent ahostsv4 "$LB_INPUT" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, -)
         if [ -n "$RESOLVES" ] || [ "$HTTP_CODE" != "000" ]; then
             DOMAIN_UP=1
             break
         fi
         sleep 2
     done
+
     if [ "$DOMAIN_UP" -eq 0 ]; then
         echo -e "  ${RED}${LB_INPUT} isn't resolving / responding right now.${RESET}"
         read -r -p "$(echo -e "  ${CYAN}Use it anyway? [y/N]: ${RESET}")" FORCE_DOMAIN
@@ -1008,9 +1099,32 @@ if [ -n "$LB_INPUT" ] && [ "$LB_INPUT" != "UNIVERSAL" ] && [ "$LB_INPUT" != "LOC
             echo -e "  ${YELLOW}Skipping the domain/LB step.${RESET}"
         fi
     else
-        echo -e "  ${GREEN}${LB_INPUT} responds - proceeding.${RESET}"
+        echo -e "  ${GREEN}${LB_INPUT} responds${RESET} ${CYAN}(A record(s): ${GREEN}${RESOLVES:-none}${CYAN}, HTTP ${GREEN}${HTTP_CODE}${CYAN})${RESET}"
+
+        # "Magic match": look at what's actually serving TLS on the domain
+        # right now, so the person isn't guessing which of the 3 options fits.
+        CF_HEADER=$(curl -s -o /dev/null -D - --max-time 6 "https://${LB_INPUT}" 2>/dev/null | tr -d '\r' | grep -i '^cf-ray:' || true)
+        CERT_ISSUER=""
+        if command -v openssl >/dev/null 2>&1; then
+            CERT_ISSUER=$(echo | timeout 6 openssl s_client -connect "${LB_INPUT}:443" -servername "${LB_INPUT}" 2>/dev/null \
+                | openssl x509 -noout -issuer 2>/dev/null | sed 's/^issuer= *//')
+        fi
+        if [ -n "$CERT_ISSUER" ]; then
+            echo -e "  ${CYAN}Current cert issuer: ${GREEN}${CERT_ISSUER}${RESET}"
+        fi
+        if [ -n "$CF_HEADER" ]; then
+            echo -e "  ${GREEN}Cloudflare-proxied domain detected.${RESET} ${YELLOW}Matches best with option 2) UNIVERSAL${RESET}"
+            echo -e "  ${YELLOW}(self-signed here + Cloudflare SSL mode set to 'Full' = an instantly valid chain for visitors).${RESET}"
+        elif [ -n "$CERT_ISSUER" ]; then
+            echo -e "  ${YELLOW}Domain already has a live cert not from Cloudflare - option 1) Domain (Google-managed) is the${RESET}"
+            echo -e "  ${YELLOW}closest match once DNS points at the static IP below; option 3) LOCAL if you'd rather reuse it.${RESET}"
+        else
+            echo -e "  ${YELLOW}No live TLS found on this domain yet - any of the 3 options will work; 1) Domain is the most${RESET}"
+            echo -e "  ${YELLOW}\"set and forget\" once DNS is pointed at the static IP below.${RESET}"
+        fi
     fi
 fi
+fi # SKIP_DOMAIN_MENU
 
 FINAL_HOST="$CLEAN_HOST"
 if [ -n "$LB_INPUT" ]; then
