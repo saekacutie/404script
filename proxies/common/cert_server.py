@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
-"""Tiny download endpoint for the OpenVPN client profile.
+"""Serve the OpenVPN client profile at /cert behind HTTP Basic auth.
 
-nginx proxies  GET /cert  ->  127.0.0.1:2224 (this file).
-
-Env:
-  OVPN_PROFILE_B64  base64 of the full client .ovpn (embedded at deploy time)
-  SSH_USERS         "user1:pass1,user2:pass2" - the same list the SSH side uses;
-                    any one of them unlocks /cert via HTTP Basic auth
-  CERT_FILENAME     download name (default: saeka.ovpn)
-
-Why auth: the profile contains the client PRIVATE KEY, and a *.run.app URL
-is public. Without a login, anyone who guesses /cert gets a working VPN.
+The profile contains a private key, so it is never served without credentials.
+The same credentials are accepted from SSH_USERS (the deploy.sh convention) or
+OVPN_USERS (useful when deploy_vm.py is run independently).  Environment values
+are read for every request so a refreshed Cloud Run instance does not retain a
+stale credential snapshot.
 """
-import base64, binascii, hmac, os, sys, time
+import base64
+import binascii
+import hmac
+import os
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-PORT = 2224
-FILENAME = "".join(c for c in os.environ.get("CERT_FILENAME", "saeka.ovpn")
-                   if c.isalnum() or c in "._-") or "saeka.ovpn"
+PORT = int(os.environ.get("CERT_PORT", "2224"))
+FILENAME = "".join(
+    c for c in os.environ.get("CERT_FILENAME", "saeka.ovpn")
+    if c.isalnum() or c in "._-"
+) or "saeka.ovpn"
+
 
 def load_profile():
     raw = os.environ.get("OVPN_PROFILE_B64", "").strip()
@@ -34,69 +36,97 @@ def load_profile():
         return None
     return text.encode()
 
+
 def load_users():
+    # SSH_USERS is the canonical deploy.sh variable. OVPN_USERS is supported
+    # for deploy_vm.py-only deployments. Do not concatenate both lists: that
+    # could unexpectedly authorize credentials from an unrelated deployment.
+    raw = os.environ.get("SSH_USERS", "") or os.environ.get("OVPN_USERS", "")
     users = {}
-    for pair in os.environ.get("SSH_USERS", "").split(","):
-        if ":" in pair:
-            u, p = pair.split(":", 1)
-            if u and p:
-                users[u] = p
+    for pair in raw.split(","):
+        user, sep, password = pair.strip().partition(":")
+        if sep and user and password:
+            users[user] = password
     return users
 
-PROFILE = load_profile()
-USERS = load_users()
 
-def check_auth(header):
+def check_auth(header, users):
     if not header or not header.startswith("Basic "):
         return False
     try:
-        user, _, pw = base64.b64decode(header[6:]).decode().partition(":")
-    except Exception:
+        decoded = base64.b64decode(header[6:], validate=True).decode("utf-8")
+        user, separator, password = decoded.partition(":")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
         return False
+    if not separator:
+        return False
+
+    # Compare every entry instead of returning on the first match.
     ok = False
-    for u, p in USERS.items():          # no early exit: constant-ish time
-        ok |= hmac.compare_digest(u, user) and hmac.compare_digest(p, pw)
+    for expected_user, expected_password in users.items():
+        ok |= hmac.compare_digest(expected_user, user) and hmac.compare_digest(
+            expected_password, password
+        )
     return ok
 
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "gw"
+    server_version = "gateway"
     sys_version = ""
 
     def _send(self, code, body=b"", headers=None):
         self.send_response(code)
-        for k, v in (headers or {}).items():
-            self.send_header(k, v)
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def do_HEAD(self): self.do_GET()
+    def do_HEAD(self):
+        self.do_GET()
 
     def do_GET(self):
-        if PROFILE is None:
-            return self._send(503, b"Profile not configured on this deployment.\n",
-                              {"Content-Type": "text/plain"})
-        if not USERS:
-            return self._send(503, b"No users configured - /cert is locked.\n",
-                              {"Content-Type": "text/plain"})
-        if not check_auth(self.headers.get("Authorization")):
-            time.sleep(1)               # slow down guessing
-            return self._send(401, b"Login required.\n", {
-                "Content-Type": "text/plain",
-                "WWW-Authenticate": 'Basic realm="VPN profile", charset="UTF-8"'})
-        # octet-stream + attachment + nosniff: iOS Safari otherwise shows the
-        # file as text instead of offering "Open in OpenVPN"; Android imports
-        # by the .ovpn extension.
-        self._send(200, PROFILE, {
-            "Content-Type": "application/octet-stream",
-            "Content-Disposition": f'attachment; filename="{FILENAME}"',
-            "X-Content-Type-Options": "nosniff"})
+        profile = load_profile()
+        users = load_users()
+        if profile is None:
+            return self._send(
+                503,
+                b"Profile not configured on this deployment.\n",
+                {"Content-Type": "text/plain"},
+            )
+        if not users:
+            return self._send(
+                503,
+                b"No users configured - /cert is locked.\n",
+                {"Content-Type": "text/plain"},
+            )
+        if not check_auth(self.headers.get("Authorization"), users):
+            time.sleep(1)
+            return self._send(
+                401,
+                b"Login required.\n",
+                {
+                    "Content-Type": "text/plain",
+                    "WWW-Authenticate": 'Basic realm="VPN profile", charset="UTF-8"',
+                },
+            )
+        return self._send(
+            200,
+            profile,
+            {
+                "Content-Type": "application/octet-stream",
+                "Content-Disposition": f'attachment; filename="{FILENAME}"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
-    def log_message(self, *a):          # never log Authorization / paths
+    def log_message(self, *_args):
+        # Never log Authorization headers or request paths.
         pass
 
+
 if __name__ == "__main__":
-    print(f"[cert] /cert {'ENABLED' if PROFILE and USERS else 'disabled'}", flush=True)
+    print("[cert] profile server started", flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
