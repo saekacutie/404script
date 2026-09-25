@@ -34,10 +34,22 @@ HOST="${1:?Usage: $0 <host> [port] [uuid_or_password] [fp]}"
 PORT="${2:-443}"
 USERID="${3:-saeka}"
 FP="${4:-chrome}"   # chrome | firefox | safari | ios | android | edge | random
+FRAGMENT_MODE="${FRAGMENT_MODE:-n}"  # y enables Xray TLS ClientHello fragmentation in JSON output
 
 case "$FP" in
     chrome|firefox|safari|ios|android|edge|random|randomized) ;;
     *) echo "[-] Unknown fp '$FP', falling back to chrome"; FP="chrome";;
+esac
+
+TLS_FRAGMENT_FIELDS=""
+case "$FRAGMENT_MODE" in
+    [Yy])
+        TLS_FRAGMENT_FIELDS=',
+      "fragment": {"packets": "tlshello", "length": "100-200", "interval": "10-20"}'
+        echo "[+] TLS ClientHello fragmentation: enabled in authoritative JSON output"
+        ;;
+    [Nn]) ;;
+    *) echo "[-] FRAGMENT_MODE must be y or n; using n"; FRAGMENT_MODE="n";;
 esac
 
 echo "[+] Probing ${HOST}:${PORT} for its live certificate (best-effort)..."
@@ -98,7 +110,7 @@ cat > "$JSON_FILE" << EOF
     "wsSettings": {"path": "/vless-saeka", "host": "${HOST}"},
     "tlsSettings": {
       "serverName": "${HOST}",
-      "fingerprint": "${FP}",
+      "fingerprint": "${FP}"${TLS_FRAGMENT_FIELDS},
       $( [ -n "$ECH_B64" ] && echo "\"echConfigList\": \"${ECH_B64}\"," )
       "pinnedPeerCertificateChainSha256": [$( [ -n "$CERT_SHA256_B64" ] && echo "\"${CERT_SHA256_B64}\"" )]
     }

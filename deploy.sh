@@ -348,9 +348,10 @@ run_quiet() {
     local pid=$!
     local spin='|/-\'
     local i=0
+    local started=$SECONDS
     while kill -0 "$pid" 2>/dev/null; do
         i=$(( (i + 1) % 4 ))
-        printf "\r  ${CYAN}%s...${RESET} %s" "$label" "${spin:$i:1}"
+        printf "\r  ${CYAN}%s...${RESET} %s %02ds" "$label" "${spin:$i:1}" "$((SECONDS - started))"
         sleep 0.2
     done
     wait "$pid"
@@ -361,8 +362,7 @@ run_quiet() {
         return 0
     else
         printf "\r  ${RED}%s... FAILED${RESET}          \n" "$label"
-        echo -e "  ${RED}Last 30 log lines (full log kept at ${logfile}):${RESET}"
-        tail -n 30 "$logfile"
+        echo -e "  ${RED}${label} failed. Details were saved to ${logfile}.${RESET}"
         return "$status"
     fi
 }
