@@ -898,6 +898,29 @@ elif [ "$PROXY_ENV" == "reality" ]; then
     prompt_reality_vm
     SSH_USERS_HASHED=$(hash_users_for_runtime "$SSH_USERS_CSV")
     ENV_VARS="^@^SSH_USERS_HASHED=${SSH_USERS_HASHED}@CERT_USERS_HASHED=${SSH_USERS_HASHED}@XHTTP_UPSTREAM_HOST=${R_VM_IP}@XHTTP_UPSTREAM_PORT=${R_RELAY_PORT}@XHTTP_PATH=${R_RELAY_PATH}@XHTTP_RELAY_CERT_B64=${R_RELAY_CERT_B64}"
+    if [ "$AUTO" -eq 1 ]; then
+        ADD_TCP="${DEPLOY_ADD_TCP_RELAY:-N}"
+        echo -e "  ${CYAN}Also expose an HTTP-Upgrade TCP byte relay?${RESET} -> ${GREEN}${ADD_TCP}${RESET}"
+    else
+        read -r -p "$(echo -e "  ${CYAN}Also expose an HTTP-Upgrade TCP byte relay? [y/N]: ${RESET}")" ADD_TCP
+    fi
+    if [[ "$ADD_TCP" =~ ^[Yy] ]]; then
+        if [ "$AUTO" -eq 1 ]; then
+            TCP_UPSTREAM_HOST="${DEPLOY_TCP_UPSTREAM_HOST:-}"
+            TCP_UPSTREAM_PORT="${DEPLOY_TCP_UPSTREAM_PORT:-443}"
+        else
+            read -r -p "$(echo -e "  ${CYAN}TCP upstream host/IP: ${RESET}")" TCP_UPSTREAM_HOST
+            read -r -p "$(echo -e "  ${CYAN}TCP upstream port [443]: ${RESET}")" TCP_UPSTREAM_PORT
+            TCP_UPSTREAM_PORT=${TCP_UPSTREAM_PORT:-443}
+        fi
+        if ! [[ "$TCP_UPSTREAM_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || \
+           ! [[ "$TCP_UPSTREAM_PORT" =~ ^[0-9]+$ ]] || [ "$TCP_UPSTREAM_PORT" -lt 1 ] || [ "$TCP_UPSTREAM_PORT" -gt 65535 ]; then
+            echo -e "  ${RED}Invalid TCP upstream; relay disabled.${RESET}"
+        else
+            ENV_VARS="${ENV_VARS}@TCP_UPSTREAM_HOST=${TCP_UPSTREAM_HOST}@TCP_UPSTREAM_PORT=${TCP_UPSTREAM_PORT}"
+            echo -e "  ${YELLOW}TCP relay is raw HTTP-Upgrade bytes, not native VLESS TCP+REALITY.${RESET}"
+        fi
+    fi
     if [ -n "$OVPN_HOST" ]; then
         ENV_VARS="${ENV_VARS}@OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
         prompt_ovpn_profile
@@ -1025,6 +1048,10 @@ elif [ "$PROXY_ENV" == "reality" ]; then
     if [ -n "$OVPN_HOST" ]; then
         echo -e "  ${GREEN}4) OpenVPN-WS${RESET}  ${CYAN}/saeka-ovpn -> ${OVPN_HOST}:${OVPN_PORT} (tcp)${RESET}"
         echo -e "     ${CYAN}Payload ${GREEN}GET /saeka-ovpn HTTP/1.1[crlf]Host: ${CLEAN_HOST}[crlf]Upgrade: websocket[crlf][crlf]${RESET}"
+    fi
+    if [ -n "${TCP_UPSTREAM_HOST:-}" ]; then
+        echo -e "  ${GREEN}5) TCP-WS${RESET}   ${CYAN}/saeka-tcp -> ${TCP_UPSTREAM_HOST}:${TCP_UPSTREAM_PORT}${RESET}"
+        echo -e "     ${CYAN}Payload ${GREEN}GET /saeka-tcp HTTP/1.1[crlf]Host: ${CLEAN_HOST}[crlf]Upgrade: websocket[crlf][crlf]${RESET}"
     fi
     if [ -n "$OVPN_PROFILE_B64" ]; then
         echo -e "  ${CYAN}Profile ${GREEN}https://${CLEAN_HOST}/cert${CYAN}  (login: one of the users above)${RESET}"

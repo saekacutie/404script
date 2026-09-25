@@ -74,6 +74,19 @@ if [ -n "$OVPN_HOST" ]; then
     fi
 fi
 
+TCP_HOST="${TCP_UPSTREAM_HOST:-}"
+TCP_PORT="${TCP_UPSTREAM_PORT:-443}"
+if [ -n "$TCP_HOST" ]; then
+    if ! [[ "$TCP_HOST" =~ ^[A-Za-z0-9.-]+$ ]]; then
+        err "TCP_UPSTREAM_HOST is not a valid IP or hostname: ${TCP_HOST}"
+        exit 1
+    fi
+    if ! [[ "$TCP_PORT" =~ ^[0-9]+$ ]] || [ "$TCP_PORT" -lt 1 ] || [ "$TCP_PORT" -gt 65535 ]; then
+        err "TCP_UPSTREAM_PORT must be 1-65535, got: ${TCP_PORT}"
+        exit 1
+    fi
+fi
+
 # ------------------------------------------ XHTTP relay to the VM (optional)
 # nginx cannot substitute env vars, so the upstream/location snippets are
 # generated here and pulled in by the "include" lines in nginx.conf.
@@ -205,6 +218,13 @@ if [ -n "$OVPN_HOST" ]; then
             --listen "0.0.0.0:2223" --target "${OVPN_HOST}:${OVPN_PORT}"
 fi
 
+if [ -n "$TCP_HOST" ]; then
+    ok "relaying /saeka-tcp -> ${TCP_HOST}:${TCP_PORT}"
+    BRIDGE_LISTEN_PORT=2225 BRIDGE_TARGET_HOST="$TCP_HOST" BRIDGE_TARGET_PORT="$TCP_PORT" \
+        launch "ws_bridge(tcp)" python3 /opt/ws_bridge.py \
+            --listen "0.0.0.0:2225" --target "${TCP_HOST}:${TCP_PORT}"
+fi
+
 # /cert: answers 503 unless both OVPN_PROFILE_B64 and users exist
 launch "cert_server" python3 /opt/cert_server.py
 
@@ -217,6 +237,7 @@ echo -e "  ${CYAN}udpgw${RESET}        127.0.0.1:${UDPGW_PORT}"
 echo -e "  ${CYAN}dropbear${RESET}     127.0.0.1:2200  (via /saeka-ssh)"
 echo -e "  ${CYAN}ws_bridge ssh${RESET} 0.0.0.0:2222 -> 127.0.0.1:2200"
 [ -n "$OVPN_HOST" ] && echo -e "  ${CYAN}ws_bridge ovpn${RESET} 0.0.0.0:2223 -> ${OVPN_HOST}:${OVPN_PORT}"
+[ -n "$TCP_HOST" ] && echo -e "  ${CYAN}ws_bridge tcp${RESET}  0.0.0.0:2225 -> ${TCP_HOST}:${TCP_PORT}"
 [ -n "$XH_HOST" ] && echo -e "  ${CYAN}xhttp relay${RESET}  ${XH_PATH} -> ${XH_HOST}:${XH_PORT}"
 echo -e "  ${CYAN}cert_server${RESET}  127.0.0.1:${CERT_PORT:-2224}  (via /cert)"
 echo -e "  ${CYAN}nginx${RESET}        0.0.0.0:8080"
