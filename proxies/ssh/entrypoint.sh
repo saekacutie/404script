@@ -10,6 +10,8 @@ ulimit -n 65535 || true
 #   OVPN_PROFILE_B64   client .ovpn, base64 (optional; enables /cert)
 OVPN_UPSTREAM_HOST="${OVPN_UPSTREAM_HOST:-}"
 OVPN_UPSTREAM_PORT="${OVPN_UPSTREAM_PORT:-1194}"
+UDPGW_MAX_CLIENTS="${UDPGW_MAX_CLIENTS:-1000}"
+UDPGW_MAX_CONNECTIONS="${UDPGW_MAX_CONNECTIONS:-500}"
 
 # ---- SSH accounts (tunnel-only, /bin/false shell) ---------------------------
 PASSWORDS_HASHED=0
@@ -45,8 +47,10 @@ start_dropbear() {
     DROPBEAR_PID=$!
 }
 start_udpgw() {
-    badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000 \
-        --max-connections-for-client 40 --loglevel warning &
+    badvpn-udpgw --listen-addr 127.0.0.1:7300 \
+        --max-clients "$UDPGW_MAX_CLIENTS" \
+        --max-connections-for-client "$UDPGW_MAX_CONNECTIONS" \
+        --loglevel warning &
     UDPGW_PID=$!
 }
 start_ssh_bridge() {
