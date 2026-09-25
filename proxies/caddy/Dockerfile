@@ -1,5 +1,5 @@
 # docker build -f proxies/caddy/Dockerfile -t IMAGE .
-# caddy:2-alpine already has caddy itself; we only add xray + ssh.
+# caddy:2-alpine already has caddy itself; we only add xray.
 FROM alpine:3.20 AS xray-fetch
 RUN apk add --no-cache curl unzip ca-certificates
 RUN curl -fsSL -o /tmp/xray.zip \
@@ -9,7 +9,7 @@ RUN curl -fsSL -o /tmp/xray.zip \
 
 FROM caddy:2-alpine
 USER root
-RUN apk add --no-cache bash openssh openssh-server shadow ca-certificates
+RUN apk add --no-cache bash ca-certificates
 
 COPY --from=xray-fetch /out/xray /usr/local/bin/xray
 RUN mkdir -p /etc/xray

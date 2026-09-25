@@ -10,17 +10,18 @@ err()  { echo -e "  ${RED}[x]${RESET} $*" >&2; }
 echo -e "${CYAN}== saeka reality gateway: entrypoint starting ==${RESET}"
 
 UDPGW_PORT="${UDPGW_PORT:-7300}"
-SSH_USERS="${SSH_USERS:-}"          # "user1:pass1,user2:pass2"
+SSH_USERS="${SSH_USERS_HASHED:-${SSH_USERS:-}}"
+PASSWORDS_HASHED=0
+[ -n "${SSH_USERS_HASHED:-}" ] && PASSWORDS_HASHED=1
 NGX=/etc/nginx
 
 # ---------------------------------------------------------------- users
 # No users supplied: create one random account and print it to the logs.
 if [ -z "$SSH_USERS" ]; then
-    gen_pass="$(python3 -c 'import secrets,string; a=string.ascii_letters+string.digits; print("".join(secrets.choice(a) for _ in range(16)))')"
-    SSH_USERS="saeka:${gen_pass}"
-    warn "SSH_USERS not set - generated one-off account  saeka / ${gen_pass}"
+    err "SSH_USERS_HASHED is required; refusing to generate or log a plaintext password."
+    exit 1
 fi
-export SSH_USERS   # cert_server.py reads the same list
+export SSH_USERS_HASHED
 
 created=0
 IFS=',' read -r -a entries <<< "$SSH_USERS"
@@ -42,7 +43,12 @@ for entry in "${entries[@]}"; do
             continue
         fi
     fi
-    if ! printf '%s:%s\n' "$name" "$pass" | chpasswd; then
+    if [ "$PASSWORDS_HASHED" -eq 1 ]; then
+        if ! printf '%s:%s\n' "$name" "$pass" | chpasswd -e; then
+            err "chpasswd failed for '$name' - skipping this user"
+            continue
+        fi
+    elif ! printf '%s:%s\n' "$name" "$pass" | chpasswd; then
         err "chpasswd failed for '$name' - skipping this user"
         continue
     fi

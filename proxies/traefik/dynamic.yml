@@ -1,10 +1,6 @@
 http:
   routers:
-    # --- SSH-over-WS / OpenVPN-over-WS (raw byte tunnels) ---
-    ssh-ws:
-      rule: "PathPrefix(`/saeka-ssh`)"
-      service: ssh-ws-svc
-      priority: 90
+    # --- OpenVPN-over-WS (standalone relay) ---
     ovpn-ws:
       rule: "PathPrefix(`/saeka-ovpn`)"
       service: ovpn-ws-svc
@@ -101,9 +97,6 @@ http:
       priority: 100
 
   services:
-    ssh-ws-svc:
-      loadBalancer:
-        servers: [{url: "http://127.0.0.1:10020"}]
     ovpn-ws-svc:
       loadBalancer:
         servers: [{url: "http://127.0.0.1:10021"}]

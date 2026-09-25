@@ -68,11 +68,17 @@ def die(message: str) -> None:
     print(colour(f"ERROR: {message}", RED), file=sys.stderr)
     raise SystemExit(1)
 
-def cmd(args: list[str], *, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess[str]:
+def cmd(args: list[str], *, check: bool = True, capture: bool = False,
+        timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     try:
-        result = subprocess.run(args, check=False, capture_output=capture, text=True)
+        result = subprocess.run(args, check=False, capture_output=capture, text=True, timeout=timeout)
     except FileNotFoundError:
         die(f"{args[0]} is not installed or is not on PATH")
+    except subprocess.TimeoutExpired as error:
+        output = error.stdout or ""
+        stderr = error.stderr or f"command timed out after {timeout}s"
+        print(colour(f"  {args[0]} timed out after {timeout}s", YELLOW), file=sys.stderr)
+        return subprocess.CompletedProcess(args, 124, output, stderr)
     if check and result.returncode:
         if result.stderr:
             print(result.stderr, file=sys.stderr)
@@ -195,7 +201,8 @@ def create_vm(project_id: str, zone: str, name: str, machine: str, ip: str, tag:
 
 def ssh(project_id: str, zone: str, name: str, remote: str) -> subprocess.CompletedProcess[str]:
     return cmd(["gcloud", "compute", "ssh", name, "--project", project_id, "--zone", zone,
-                "--tunnel-through-iap", "--quiet", "--command", remote], capture=True, check=False)
+                "--tunnel-through-iap", "--quiet", "--command", remote],
+               capture=True, check=False, timeout=20)
 
 def serial_log_tail(project_id: str, zone: str, name: str, lines: int = 12) -> list[str]:
     """Best-effort tail of the startup-script log via the serial console.
@@ -206,14 +213,14 @@ def serial_log_tail(project_id: str, zone: str, name: str, lines: int = 12) -> l
     """
     result = cmd(["gcloud", "compute", "instances", "get-serial-port-output", name,
                   "--project", project_id, "--zone", zone, "--port", "1"],
-                 capture=True, check=False)
+                 capture=True, check=False, timeout=15)
     if result.returncode or not result.stdout:
         return []
     relevant = [ln.rstrip() for ln in result.stdout.splitlines()
                 if "vm-setup" in ln or ln.strip().startswith("===") or "WARNING" in ln or "ERROR" in ln]
     return (relevant or result.stdout.splitlines())[-lines:]
 
-def wait_ready(project_id: str, zone: str, name: str, timeout: int = 900) -> dict:
+def wait_ready(project_id: str, zone: str, name: str, timeout: int = 600) -> dict:
     end = time.time() + timeout
     started = time.time()
     last_reason = ""
@@ -236,7 +243,7 @@ def wait_ready(project_id: str, zone: str, name: str, timeout: int = 900) -> dic
 
         # Every ~30s, pull a few lines of the real startup-script log instead
         # of leaving the person staring at a silent spinner.
-        if time.time() - last_log_print >= 30:
+        if time.time() - last_log_print >= 20:
             last_log_print = time.time()
             tail = serial_log_tail(project_id, zone, name)
             status_line = f"  [{elapsed:>4}s] {last_reason or 'booting'}"
@@ -248,7 +255,7 @@ def wait_ready(project_id: str, zone: str, name: str, timeout: int = 900) -> dic
                 print(colour("  ----------------------------------", DIM))
         else:
             print(f"\r  [{elapsed:>4}s] waiting...", end="", flush=True)
-        time.sleep(10)
+        time.sleep(5)
 
     print()
     print(colour(f"  TIMED OUT after {timeout}s waiting on {name}.", RED))
@@ -280,8 +287,6 @@ def scp(project_id: str, zone: str, name: str, remote: str, local: Path) -> bool
     return result.returncode == 0
 
 def cloudflare(domain: str, subdomain: str, ip: str, token: str) -> str | None:
-    root = ".".join(domain.rstrip(".").split(".")[-2:])
-    fqdn = f"{subdomain}.{root}"
     def request(method: str, path: str, payload: dict | None = None) -> dict:
         body = None if payload is None else json.dumps(payload).encode()
         req = urllib.request.Request("https://api.cloudflare.com/client/v4" + path,
@@ -293,10 +298,18 @@ def cloudflare(domain: str, subdomain: str, ip: str, token: str) -> str | None:
         except (urllib.error.HTTPError, urllib.error.URLError) as error:
             print(colour(f"Cloudflare request failed: {error}", YELLOW))
             return {}
-    zones = request("GET", f"/zones?name={root}")
-    if not zones.get("success") or not zones.get("result"):
+    requested = domain.rstrip(".").lower()
+    zones = request("GET", "/zones?per_page=100&status=active")
+    available = zones.get("result", []) if zones.get("success") else []
+    matching = [z for z in available if requested == z.get("name", "").lower()
+                or requested.endswith("." + z.get("name", "").lower())]
+    if not matching:
+        print(colour(f"Cloudflare has no active zone matching {domain}.", YELLOW))
         return None
-    zone = zones["result"][0]["id"]
+    zone_record = max(matching, key=lambda z: len(z.get("name", "")))
+    root = zone_record["name"]
+    fqdn = f"{subdomain}.{root}" if subdomain else root
+    zone = zone_record["id"]
     records = request("GET", f"/zones/{zone}/dns_records?type=A&name={fqdn}")
     payload = {"type": "A", "name": fqdn, "content": ip, "ttl": 120, "proxied": False}
     if records.get("result"):
@@ -762,6 +775,17 @@ def main() -> None:
         print(colour(f"  Skipping straight to the readiness check for the existing VM.", CYAN))
     result = wait_ready(project_id, zone, name)
 
+    if ovpn and result.get("openvpn", {}).get("proto") != oproto:
+        die(f"existing VM {name} has OpenVPN proto={result.get('openvpn', {}).get('proto')}; "
+            f"requested {oproto}. Delete it and rerun to rebuild it.")
+    if ovpn and users_hash and not result.get("openvpn", {}).get("auth"):
+        die(f"existing VM {name} has certificate-only OpenVPN; delete it and rerun "
+            "to provision the requested user credentials.")
+    if reality and result.get("reality", {}).get("transport") != rtransport:
+        die(f"existing VM {name} uses REALITY transport "
+            f"{result.get('reality', {}).get('transport', 'unknown')}; delete it and rerun "
+            f"for {rtransport}.")
+
     reality_info = result.get("reality", {"enabled": False})
     if reality and not reality_info.get("enabled"):
         print(colour("  REALITY did not come up; see /var/log/vm-setup.log on the VM.", YELLOW))
@@ -789,6 +813,7 @@ def main() -> None:
         "ovpn_enabled": bool(ovpn),
         "ovpn_port": oport if ovpn else None,
         "ovpn_proto": oproto if ovpn else None,
+        "ovpn_auth": bool(result.get("openvpn", {}).get("auth")),
         "ssh_tunnel_enabled": bool(ssh_tunnel),
         "reality": reality_info,
         "updated": time.time(),

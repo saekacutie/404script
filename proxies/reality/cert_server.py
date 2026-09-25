@@ -10,6 +10,7 @@ import binascii
 import hmac
 import logging
 import os
+import subprocess
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,8 +39,14 @@ log.addHandler(_handler)
 log.propagate = False
 
 
-def load_users(raw):
+def load_users(raw, hashed_raw):
     users = {}
+    for entry in hashed_raw.split(","):
+        name, separator, encoded = entry.partition(":")
+        if separator and name and encoded.startswith("$6$"):
+            users[name] = encoded
+    if users:
+        return users
     for entry in raw.split(","):
         name, sep, password = entry.partition(":")
         if sep and name and password:
@@ -47,7 +54,7 @@ def load_users(raw):
     return users
 
 
-USERS = load_users(os.environ.get("SSH_USERS", ""))
+USERS = load_users(os.environ.get("SSH_USERS", ""), os.environ.get("CERT_USERS_HASHED", ""))
 try:
     PROFILE = base64.b64decode(os.environ.get("OVPN_PROFILE_B64", ""), validate=True)
 except (binascii.Error, ValueError):
@@ -70,7 +77,18 @@ def authorised(header):
         return False, None
     expected = USERS.get(user)
     # Always run one comparison so response time doesn't reveal which names exist.
-    same = hmac.compare_digest((expected or "x" * 16).encode(), password.encode())
+    if isinstance(expected, str) and expected.startswith("$6$"):
+        salt = expected.split("$", 3)[2]
+        try:
+            candidate = subprocess.run(
+                ["openssl", "passwd", "-6", "-salt", salt, "-stdin"],
+                input=password, text=True, capture_output=True, timeout=2, check=True,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            candidate = ""
+        same = hmac.compare_digest(candidate, expected)
+    else:
+        same = hmac.compare_digest((expected or "x" * 16).encode(), password.encode())
     return (same and expected is not None), user
 
 

@@ -107,7 +107,7 @@ render_gate_screen() {
     box_line "HAProxy · Envoy · Caddy · H2O · Traefik · OpenResty"
     box_blank
     box_line "SUPPORTED TRANSPORTS" "${BOLD}${CYAN}"
-    box_line "WebSocket · HTTPUpgrade · XHTTP · gRPC* · H2 · SSH-WS"
+    box_line "WebSocket · HTTPUpgrade · XHTTP · gRPC* · H2"
     box_line "(*gRPC/H2 unsupported on OpenResty)" "${YELLOW}"
     box_blank
     box_line "This tool provisions real GCP billing resources." "${YELLOW}"
@@ -117,9 +117,9 @@ render_gate_screen() {
 }
 
 ALLOWED_HASHES=(
-    "2c443ca329d2d85d093b80349ee88cc23169eaec1698dea050920836773fb7ad"
-    "718052c0d0866bb03f23d3d4f2488f2aa86c435b9fd658abecbfc4c7abf2de47"
-    "57141b782821c05da2e2bcb1e2fa1253bce1a817c0d14f79bc899e1171ad7bb0"
+    "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    "ee1956c052582e534573d95c67493d21780a982368253de9e78503da67372253"
+    "65e84be33532fb784c48129675f9eff3a682b27168c0ea744b2cf58ee02337c5"
     ""  # slot 4 - paste a hash here, or leave blank to keep this slot unused
     ""  # slot 5
     ""  # slot 6
@@ -187,7 +187,7 @@ echo -e "  ${YELLOW}2) Envoy      - full protocol support incl. gRPC (fast & sta
 echo -e "  ${YELLOW}3) Caddy      - full protocol support incl. gRPC (fast & stable)${RESET}"
 echo -e "  ${YELLOW}4) H2O        - full protocol support incl. gRPC${RESET}"
 echo -e "  ${YELLOW}5) Traefik    - full protocol support incl. gRPC (recommended)${RESET}"
-echo -e "  ${YELLOW}6) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
+echo -e "  ${YELLOW}6) OpenResty  - WS/HTTPUpgrade/XHTTP only, NO gRPC/H2 (nginx limitation)${RESET}"
 echo -e "  ${YELLOW}7) SSH Gateway - standalone SSH-over-WS (+ UDPGW), optional OpenVPN relay + /cert${RESET}"
 echo -e "  ${YELLOW}8) OVPN Relay  - standalone WS relay to a REAL OpenVPN server on a VM (+ /cert)${RESET}"
 echo -e "  ${YELLOW}9) Reality Combo - VLESS+XHTTP+REALITY on a VM + Cloud Run relay (+ SSH-WS, OpenVPN-WS, /cert)${RESET}"
@@ -418,10 +418,15 @@ prompt_ovpn_upstream() {
         fi
         local ovpn_enabled
         ovpn_enabled=$(jq -r '.ovpn_enabled' "$chosen")
-        if [ "$ovpn_enabled" == "true" ]; then
+        ovpn_proto=$(jq -r '.ovpn_proto // empty' "$chosen")
+        ovpn_auth=$(jq -r '.ovpn_auth // false' "$chosen")
+        if [ "$ovpn_enabled" == "true" ] && [ "$ovpn_proto" == "tcp" ] && \
+           { [ -z "$SSH_USERS_CSV" ] || [ "$ovpn_auth" == "true" ]; }; then
             OVPN_HOST=$(jq -r '.host' "$chosen")
             OVPN_PORT=$(jq -r '.ovpn_port' "$chosen")
             echo -e "  ${GREEN}Using $(jq -r '.vm_name' "$chosen") from deploy_vm.py: ${OVPN_HOST}:${OVPN_PORT}${RESET}"
+        elif [ "$ovpn_enabled" == "true" ]; then
+            echo -e "  ${YELLOW}$(jq -r '.vm_name' "$chosen") cannot satisfy this relay (proto=${ovpn_proto}, credentials=${ovpn_auth}). Provisioning a compatible VM.${RESET}"
         else
             echo -e "  ${YELLOW}$(jq -r '.vm_name' "$chosen") didn't have OpenVPN enabled - falling back to manual entry.${RESET}"
         fi
@@ -531,6 +536,27 @@ prompt_ovpn_profile() {
 }
 
 SSH_USERS_CSV=""
+hash_users_for_runtime() {
+    python3 - "$1" <<'PYEOF'
+import secrets
+import subprocess
+import sys
+
+result = []
+for entry in filter(None, sys.argv[1].split(",")):
+    user, separator, password = entry.partition(":")
+    if not separator or not password:
+        continue
+    salt = secrets.token_hex(8)
+    hashed = subprocess.run(
+        ["openssl", "passwd", "-6", "-salt", salt, "-stdin"],
+        input=password, text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    result.append(f"{user}:{hashed}")
+print(",".join(result))
+PYEOF
+}
+
 collect_users() {
     local purpose="$1" use_env=""
     SSH_USERS_CSV=""
@@ -631,7 +657,15 @@ prompt_reality_vm() {
 
     if [ -d "$info_dir" ]; then
         while IFS= read -r f; do
+            reality_ok=0
             if [ "$(jget "$f" reality.transport)" = "xhttp" ] && [ "$(jget "$f" reality.relay.enabled)" = "true" ]; then
+                reality_ok=1
+                if [ "$(jget "$f" ovpn_enabled)" = "true" ] && \
+                   { [ "$(jget "$f" ovpn_proto)" != "tcp" ] || [ "$(jget "$f" ovpn_auth)" != "true" ]; }; then
+                    reality_ok=0
+                fi
+            fi
+            if [ "$reality_ok" -eq 1 ]; then
                 candidates+=("$f")
             fi
         done < <(ls -t "$info_dir"/*-info.json 2>/dev/null)
@@ -790,7 +824,8 @@ if [ "$PROXY_ENV" == "ssh" ]; then
     echo ""
     collect_users "the SSH gateway"
     echo ""
-    ENV_VARS="^@^SSH_USERS=${SSH_USERS_CSV}"
+    SSH_USERS_HASHED=$(hash_users_for_runtime "$SSH_USERS_CSV")
+    ENV_VARS="^@^SSH_USERS_HASHED=${SSH_USERS_HASHED}"
     if [ "$AUTO" -eq 1 ]; then
         ADD_OVPN="${DEPLOY_ADD_OVPN:-N}"
         echo -e "  ${CYAN}Also relay OpenVPN (/saeka-ovpn) to a VM on this same service?${RESET} -> ${GREEN}${ADD_OVPN}${RESET}"
@@ -803,7 +838,7 @@ if [ "$PROXY_ENV" == "ssh" ]; then
         ENV_VARS="${ENV_VARS}@OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
         prompt_ovpn_profile
         if [ -n "$OVPN_PROFILE_B64" ]; then
-            ENV_VARS="${ENV_VARS}@OVPN_PROFILE_B64=${OVPN_PROFILE_B64}"
+            ENV_VARS="${ENV_VARS}@CERT_USERS_HASHED=${SSH_USERS_HASHED}@OVPN_PROFILE_B64=${OVPN_PROFILE_B64}"
             if [ -z "$SSH_USERS_CSV" ]; then
                 echo -e "  ${YELLOW}No users were added, so /cert will stay locked (503). Re-run with a user.${RESET}"
             fi
@@ -818,14 +853,17 @@ elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     echo -e "  ${YELLOW}(deploy_vm.py). That server must use proto tcp, and the VM must${RESET}"
     echo -e "  ${YELLOW}already be running with its static IP ready.${RESET}"
     echo ""
+    # Collect credentials before provisioning a VM. deploy_vm.py hashes these
+    # into the OpenVPN server, so collecting them afterward creates a
+    # certificate-only VM that cannot accept the credentials shown to users.
+    collect_users "the OpenVPN login"
+    SSH_USERS_HASHED=$(hash_users_for_runtime "$SSH_USERS_CSV")
     prompt_ovpn_upstream
     ENV_VARS="^@^OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
     prompt_ovpn_profile
     if [ -n "$OVPN_PROFILE_B64" ]; then
-        echo -e "  ${CYAN}/cert needs a login - use the same user:pass as your OpenVPN users.${RESET}"
-        collect_users "the /cert download login"
         if [ -n "$SSH_USERS_CSV" ]; then
-            ENV_VARS="${ENV_VARS}@SSH_USERS=${SSH_USERS_CSV}@OVPN_PROFILE_B64=${OVPN_PROFILE_B64}"
+            ENV_VARS="${ENV_VARS}@CERT_USERS_HASHED=${SSH_USERS_HASHED}@OVPN_PROFILE_B64=${OVPN_PROFILE_B64}"
         else
             echo -e "  ${YELLOW}No users given - /cert disabled (it never serves the key without a login).${RESET}"
             OVPN_PROFILE_B64=""
@@ -858,7 +896,8 @@ elif [ "$PROXY_ENV" == "reality" ]; then
     fi
     echo ""
     prompt_reality_vm
-    ENV_VARS="^@^SSH_USERS=${SSH_USERS_CSV}@XHTTP_UPSTREAM_HOST=${R_VM_IP}@XHTTP_UPSTREAM_PORT=${R_RELAY_PORT}@XHTTP_PATH=${R_RELAY_PATH}@XHTTP_RELAY_CERT_B64=${R_RELAY_CERT_B64}"
+    SSH_USERS_HASHED=$(hash_users_for_runtime "$SSH_USERS_CSV")
+    ENV_VARS="^@^SSH_USERS_HASHED=${SSH_USERS_HASHED}@CERT_USERS_HASHED=${SSH_USERS_HASHED}@XHTTP_UPSTREAM_HOST=${R_VM_IP}@XHTTP_UPSTREAM_PORT=${R_RELAY_PORT}@XHTTP_PATH=${R_RELAY_PATH}@XHTTP_RELAY_CERT_B64=${R_RELAY_CERT_B64}"
     if [ -n "$OVPN_HOST" ]; then
         ENV_VARS="${ENV_VARS}@OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
         prompt_ovpn_profile

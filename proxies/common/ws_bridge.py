@@ -63,26 +63,26 @@ async def pipe(source, target):
         while True:
             data = await source.read(BUF)
             if not data:
+                try:
+                    target.write_eof()
+                    await target.drain()
+                except (AttributeError, ConnectionError, OSError):
+                    pass
                 return
             target.write(data)
             await target.drain()
     except (asyncio.CancelledError, ConnectionError, OSError):
         return
-    finally:
-        try:
-            target.close()
-        except Exception:
-            pass
 
 
 async def handle(client, target_host, target_port):
     peer = client.get_extra_info("peername")
+    upstream = None
     try:
         tune(client)
         head = await read_head(client)
-        if not head:
-            client.close()
-            return
+        if not head or b"\r\n\r\n" not in head:
+            raise ConnectionError("incomplete HTTP upgrade headers")
         hdrs = headers(head)
         if "upgrade" not in hdrs:
             client.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
@@ -100,17 +100,16 @@ async def handle(client, target_host, target_port):
             asyncio.create_task(pipe(client, upstream)),
             asyncio.create_task(pipe(upstream_reader, client)),
         ]
-        _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
     except (asyncio.TimeoutError, ConnectionError, OSError) as exc:
         log.warning("%s: %s", peer, exc)
     finally:
-        try:
-            client.close()
-        except Exception:
-            pass
+        for writer in (client, upstream):
+            if writer is not None:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
 
 
 async def serve(listen_host, listen_port, target_host, target_port):

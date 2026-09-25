@@ -11,6 +11,7 @@ import base64
 import binascii
 import hmac
 import os
+import subprocess
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -41,8 +42,16 @@ def load_users():
     # SSH_USERS is the canonical deploy.sh variable. OVPN_USERS is supported
     # for deploy_vm.py-only deployments. Do not concatenate both lists: that
     # could unexpectedly authorize credentials from an unrelated deployment.
-    raw = os.environ.get("SSH_USERS", "") or os.environ.get("OVPN_USERS", "")
+    raw_hashed = os.environ.get("CERT_USERS_HASHED", "")
     users = {}
+    for pair in raw_hashed.split(","):
+        user, separator, encoded = pair.strip().partition(":")
+        if separator and user and encoded.startswith("$6$"):
+            users[user] = encoded
+    if users:
+        return users
+
+    raw = os.environ.get("SSH_USERS", "") or os.environ.get("OVPN_USERS", "")
     for pair in raw.split(","):
         user, sep, password = pair.strip().partition(":")
         if sep and user and password:
@@ -64,9 +73,19 @@ def check_auth(header, users):
     # Compare every entry instead of returning on the first match.
     ok = False
     for expected_user, expected_password in users.items():
-        ok |= hmac.compare_digest(expected_user, user) and hmac.compare_digest(
-            expected_password, password
-        )
+        if expected_password.startswith("$6$"):
+            salt = expected_password.split("$", 3)[2]
+            try:
+                result = subprocess.run(
+                    ["openssl", "passwd", "-6", "-salt", salt, "-stdin"],
+                    input=password, text=True, capture_output=True, timeout=2, check=True,
+                ).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                result = ""
+            password_ok = hmac.compare_digest(result, expected_password)
+        else:
+            password_ok = hmac.compare_digest(expected_password, password)
+        ok |= hmac.compare_digest(expected_user, user) and password_ok
     return ok
 
 
@@ -92,8 +111,8 @@ class Handler(BaseHTTPRequestHandler):
         users = load_users()
         if profile is None:
             return self._send(
-                503,
-                b"Profile not configured on this deployment.\n",
+                404,
+                b"OpenVPN profile is not configured on this deployment.\n",
                 {"Content-Type": "text/plain"},
             )
         if not users:

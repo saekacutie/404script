@@ -7,7 +7,7 @@ FROM debian:bookworm-slim
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        dropbear-bin nginx python3 cmake build-essential git ca-certificates \
+        dropbear-bin nginx python3 openssl cmake build-essential git ca-certificates \
     && git clone --depth 1 https://github.com/ambrop72/badvpn.git /tmp/badvpn \
     && mkdir /tmp/badvpn/build && cd /tmp/badvpn/build \
     && cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 \

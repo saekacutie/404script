@@ -25,12 +25,7 @@ static_resources:
               - match: { prefix: "/health" }
                 direct_response: { status: 200, body: { inline_string: "OK" } }
 
-              # SSH-over-WS / OpenVPN-over-WS - raw byte tunnels via
-              # Xray's dokodemo-door inbound, same WS pattern as everything
-              # else here. Paths don't overlap any other prefix, so order
-              # relative to the rest doesn't matter.
-              - match: { prefix: "/saeka-ssh" }
-                route: { cluster: xray_10020, timeout: 0s, idle_timeout: 0s }
+              # OpenVPN-over-WS is kept as a standalone relay path.
               - match: { prefix: "/saeka-ovpn" }
                 route: { cluster: xray_10021, timeout: 0s, idle_timeout: 0s }
 
@@ -212,15 +207,7 @@ static_resources:
       - lb_endpoints:
         - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10011 } } }
 
-  # SSH-over-WS / OpenVPN-over-WS raw byte tunnels (HTTP/1.1, no h2)
-  - name: xray_10020
-    type: STATIC
-    connect_timeout: 1s
-    load_assignment:
-      cluster_name: xray_10020
-      endpoints:
-      - lb_endpoints:
-        - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10020 } } }
+  # OpenVPN-over-WS raw byte tunnel (HTTP/1.1, no h2)
   - name: xray_10021
     type: STATIC
     connect_timeout: 1s

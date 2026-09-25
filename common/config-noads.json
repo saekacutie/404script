@@ -649,24 +649,6 @@
           "tcpKeepAliveInterval": 15
         }
       }
-    },
-    {
-      "port": 10020,
-      "listen": "127.0.0.1",
-      "protocol": "dokodemo-door",
-      "tag": "ssh-ws",
-      "settings": {
-        "address": "127.0.0.1",
-        "port": 22,
-        "network": "tcp",
-        "followRedirect": false
-      },
-      "streamSettings": {
-        "network": "ws",
-        "wsSettings": {
-          "path": "/saeka-ssh"
-        }
-      }
     }
   ],
   "outbounds": [
@@ -704,8 +686,7 @@
           "trojan-h2",
           "vmess-h2",
           "vless-h2",
-          "ss-h2",
-          "ssh-ws"
+          "ss-h2"
         ],
         "outboundTag": "direct"
       }

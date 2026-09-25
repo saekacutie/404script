@@ -80,21 +80,23 @@ async def pipe(src, dst, tag=""):
         log.debug("pipe %s ended: %s", tag, exc)
     finally:
         try:
-            dst.close()
-        except OSError:
+            dst.write_eof()
+            await dst.drain()
+        except (AttributeError, ConnectionError, OSError):
             pass
     return total
 
 
 async def handle_client(reader, writer, target_host, target_port):
     peer = writer.get_extra_info("peername")
+    up_writer = None
     try:
         head = await read_http_head(reader)
     except Exception as exc:
         log.warning("bad handshake from %s: %s", peer, exc)
         writer.close()
         return
-    if not head:
+    if not head or b"\r\n\r\n" not in head:
         log.debug("empty handshake from %s (client disconnected early)", peer)
         writer.close()
         return
@@ -113,6 +115,9 @@ async def handle_client(reader, writer, target_host, target_port):
         pipe(reader, up_writer, "down"), pipe(up_reader, writer, "up"),
     )
     log.info("closed %s (down=%dB up=%dB)", peer, down, up)
+    for relay_writer in (writer, up_writer):
+        if relay_writer is not None:
+            relay_writer.close()
 
 
 async def main():

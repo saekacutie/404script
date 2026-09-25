@@ -1,5 +1,5 @@
 # docker build -f proxies/traefik/Dockerfile -t IMAGE .
-# traefik:v3.1 already has traefik itself; we only add xray + ssh.
+# traefik:v3.1 already has traefik itself; we only add xray.
 FROM alpine:3.20 AS xray-fetch
 RUN apk add --no-cache curl unzip ca-certificates
 RUN curl -fsSL -o /tmp/xray.zip \
@@ -9,7 +9,7 @@ RUN curl -fsSL -o /tmp/xray.zip \
 
 FROM traefik:v3.1
 USER root
-RUN apk add --no-cache bash openssh openssh-server shadow ca-certificates
+RUN apk add --no-cache bash ca-certificates
 
 COPY --from=xray-fetch /out/xray /usr/local/bin/xray
 RUN mkdir -p /etc/xray

@@ -1,5 +1,5 @@
 # docker build -f proxies/h2o/Dockerfile -t IMAGE .
-# Plain Alpine base - h2o itself comes from the apk repo, same as xray/ssh.
+# Plain Alpine base - h2o itself comes from the apk repo, same as xray.
 FROM alpine:3.20 AS xray-fetch
 RUN apk add --no-cache curl unzip ca-certificates
 RUN curl -fsSL -o /tmp/xray.zip \
@@ -9,7 +9,7 @@ RUN curl -fsSL -o /tmp/xray.zip \
 
 FROM alpine:3.20
 USER root
-RUN apk add --no-cache bash openssh openssh-server shadow ca-certificates h2o
+RUN apk add --no-cache bash ca-certificates h2o
 
 COPY --from=xray-fetch /out/xray /usr/local/bin/xray
 RUN mkdir -p /etc/xray
