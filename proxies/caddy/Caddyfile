@@ -13,16 +13,6 @@
         respond "OK" 200
     }
 
-    # SSH-over-WS / OpenVPN-over-WS - raw byte tunnels via Xray's
-    # dokodemo-door inbound. Caddy auto-sorts handle blocks by
-    # specificity, so position here doesn't matter.
-    handle /saeka-ssh* {
-        reverse_proxy 127.0.0.1:10020
-    }
-    handle /saeka-ovpn* {
-        reverse_proxy 127.0.0.1:10021
-    }
-
     # --- TROJAN (longest/most specific prefixes first) ---
     handle /saeka-tojirp-grpc* {
         reverse_proxy 127.0.0.1:10012 {
