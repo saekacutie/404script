@@ -509,9 +509,10 @@
         ]
       },
       "streamSettings": {
-        "network": "http",
-        "httpSettings": {
-          "path": "/saeka-tojirp-h2"
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/saeka-tojirp-h2",
+          "mode": "auto"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -541,9 +542,10 @@
         ]
       },
       "streamSettings": {
-        "network": "http",
-        "httpSettings": {
-          "path": "/vmess-saeka-h2"
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/vmess-saeka-h2",
+          "mode": "auto"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -573,9 +575,10 @@
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "http",
-        "httpSettings": {
-          "path": "/vless-saeka-h2"
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/vless-saeka-h2",
+          "mode": "auto"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -605,9 +608,10 @@
         ]
       },
       "streamSettings": {
-        "network": "http",
-        "httpSettings": {
-          "path": "/ss-saeka-h2"
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/ss-saeka-h2",
+          "mode": "auto"
         },
         "sockopt": {
           "tcpFastOpen": true,

@@ -197,8 +197,14 @@ if [ "$REALITY" = true ]; then
 
   UUID=$(cat /proc/sys/kernel/random/uuid)
   KEYS=$(/usr/local/bin/xray x25519)
-  PRIVATE=$(echo "$KEYS" | awk -F': ' '/Private key/{print $2}')
-  PUBLIC=$(echo "$KEYS" | awk -F': ' '/Public key/{print $2}')
+  # Xray >= 25.x prints "PrivateKey:" / "Password (PublicKey):"; older builds
+  # print "Private key:" / "Public key:". Match either so REALITY keys are never
+  # silently empty (which makes Xray refuse to start).
+  PRIVATE=$(printf '%s\n' "$KEYS" | awk -F': *' 'tolower($1) ~ /private.*key/ {print $NF; exit}')
+  PUBLIC=$(printf '%s\n' "$KEYS" | awk -F': *' 'tolower($1) ~ /(public.*key)|password/ {print $NF; exit}')
+  if [ -z "$PRIVATE" ] || [ -z "$PUBLIC" ]; then
+    echo "WARNING: could not parse x25519 keys from: $KEYS"
+  fi
   SID=$(openssl rand -hex 8)
 
   # Clean VLESS+REALITY config — no legacy HTTP transport here
@@ -386,7 +392,7 @@ def main() -> None:
     dest = ask("REALITY destination host:port", f"{sni}:443") if reality else f"{sni}:443"
 
     oport = int(ask("OpenVPN port", "1194")) if ovpn else 1194
-    oproto = ask("OpenVPN protocol (udp/tcp)", "udp").lower() if ovpn else "udp"
+    oproto = ask("OpenVPN protocol (udp/tcp) - must be tcp for the Cloud Run WS relay", "tcp").lower() if ovpn else "tcp"
     if oproto not in {"udp", "tcp"}:
         die("OpenVPN protocol must be udp or tcp")
 
