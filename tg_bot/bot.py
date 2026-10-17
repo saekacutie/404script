@@ -2,10 +2,11 @@
 """
 saeka-premium-bot — 4N1 FAST DEPLOYER Telegram Bot (Premium Edition)
 Public bot with admin panel (/admin, saeka/saeka404).
+Access control: New users = pending approval. Admin can approve/reject
+and generate access keys. Users can also input an admin-generated key.
 Button-only interaction. Commands: /start, /admin.
-Welcome -> Deploy | Exit -> Fallback link -> Selection -> Deploy -> Links.
-HTML-styled fonts, GIF animations, Back/Exit/Help on every screen.
-Admin: live users, block users, add allowed users.
+Welcome -> Deploy | Exit | Help -> Fallback link -> Selection -> Deploy -> Links.
+HTML-styled fonts, GIF animations, Back/Exit on every screen.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import signal
 import time
 from pathlib import Path
@@ -53,6 +55,7 @@ GIFS = {
     "processing": "https://media.giphy.com/media/3o6ZtaO9BZHcOjmErm/giphy.gif",
     "link": "https://media.giphy.com/media/xT9IgzoKnwFNfISR8I/giphy.gif",
     "help": "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",
+    "pending": "https://media.giphy.com/media/3o7aC0alA5362z1O3m/giphy.gif",
 }
 
 BASE = Path(__file__).resolve().parent
@@ -99,34 +102,12 @@ HOST_RE = re.compile(r"^[A-Za-z0-9.-]+$")
 ADMIN_USER = "saeka"
 ADMIN_PASS = "saeka404"
 
-
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def esc(text: str) -> str:
-    return html.escape(str(text), quote=False)
-
-
-def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(label, callback_data=data) for label, data in row] for row in rows]
-    )
-
-
-def with_nav(rows: list[list[tuple[str, str]]], extra_back: bool = True) -> list[list[tuple[str, str]]]:
-    nav = []
-    if extra_back:
-        nav.append([("Back", "nav:back")])
-    nav.append([("Exit", "nav:exit")])
-    return rows + nav
-
-
-# ---------------------------------------------------------------------------
-# User storage
+# Data files
 # ---------------------------------------------------------------------------
 USERS_FILE = DATA / "users.json"
+TOKENS_FILE = DATA / "tokens.json"
 BLOCKED_FILE = DATA / "blocked.json"
-ALLOWED_FILE = DATA / "allowed.json"
 ADMIN_SESSIONS_FILE = DATA / "admin_sessions.json"
 
 
@@ -154,20 +135,20 @@ def save_users(users: dict) -> None:
     _save_json(USERS_FILE, users)
 
 
+def load_tokens() -> dict:
+    return _load_json(TOKENS_FILE, {})
+
+
+def save_tokens(tokens: dict) -> None:
+    _save_json(TOKENS_FILE, tokens)
+
+
 def load_blocked() -> dict:
     return _load_json(BLOCKED_FILE, {})
 
 
 def save_blocked(blocked: dict) -> None:
     _save_json(BLOCKED_FILE, blocked)
-
-
-def load_allowed() -> list:
-    return _load_json(ALLOWED_FILE, [])
-
-
-def save_allowed(allowed: list) -> None:
-    _save_json(ALLOWED_FILE, allowed)
 
 
 def load_admin_sessions() -> dict:
@@ -178,6 +159,9 @@ def save_admin_sessions(sessions: dict) -> None:
     _save_json(ADMIN_SESSIONS_FILE, sessions)
 
 
+# ---------------------------------------------------------------------------
+# Access control
+# ---------------------------------------------------------------------------
 def is_blocked(uid: int) -> tuple[bool, str | None]:
     blocked = load_blocked()
     key = str(uid)
@@ -186,30 +170,20 @@ def is_blocked(uid: int) -> tuple[bool, str | None]:
     return False, None
 
 
-def is_allowed(uid: int, username: str | None) -> bool:
+def get_user_status(uid: int) -> str:
+    """Return: approved, pending, rejected, blocked, or unknown."""
     blocked, _ = is_blocked(uid)
     if blocked:
-        return False
-    allowed = load_allowed()
-    if not allowed:
-        return True
-    return str(uid) in allowed or (username and username in allowed)
-
-
-def record_user(update: Update) -> None:
-    user = update.effective_user
-    if not user:
-        return
+        return "blocked"
     users = load_users()
-    key = str(user.id)
-    users[key] = {
-        "id": user.id,
-        "username": user.username or "",
-        "first_name": user.first_name or "",
-        "last_name": user.last_name or "",
-        "last_seen": time.time(),
-    }
-    save_users(users)
+    key = str(uid)
+    if key in users:
+        return users[key].get("status", "pending")
+    return "unknown"
+
+
+def is_approved(uid: int) -> bool:
+    return get_user_status(uid) == "approved"
 
 
 def is_admin_session(uid: int) -> bool:
@@ -231,6 +205,177 @@ def clear_admin_session(uid: int) -> None:
     sessions = load_admin_sessions()
     sessions.pop(str(uid), None)
     save_admin_sessions(sessions)
+
+
+def register_or_update_user(user) -> str:
+    """Register a new user or update existing. Returns status."""
+    users = load_users()
+    key = str(user.id)
+    if key not in users:
+        users[key] = {
+            "id": user.id,
+            "username": user.username or "",
+            "first_name": user.first_name or "",
+            "last_name": user.last_name or "",
+            "status": "pending",
+            "joined_at": time.time(),
+            "approved_at": None,
+            "approved_by": None,
+            "token": None,
+        }
+        save_users(users)
+        return "pending"
+    # Update last seen
+    users[key]["last_seen"] = time.time()
+    save_users(users)
+    return users[key].get("status", "pending")
+
+
+def set_user_status(uid: int, status: str, approved_by: int | None = None) -> None:
+    users = load_users()
+    key = str(uid)
+    if key in users:
+        users[key]["status"] = status
+        if status == "approved":
+            users[key]["approved_at"] = time.time()
+            users[key]["approved_by"] = approved_by
+        save_users(users)
+
+
+def generate_access_key() -> str:
+    return "SAEKA-" + secrets.token_urlsafe(16)
+
+
+def create_access_key(generated_by: int, expires_hours: int = 24) -> str:
+    key = generate_access_key()
+    tokens = load_tokens()
+    tokens[key] = {
+        "key": key,
+        "generated_by": generated_by,
+        "generated_at": time.time(),
+        "expires_at": time.time() + (expires_hours * 3600),
+        "used": False,
+        "used_by": None,
+    }
+    save_tokens(tokens)
+    return key
+
+
+def validate_access_key(key: str) -> tuple[bool, str | None]:
+    """Returns (valid, message)"""
+    tokens = load_tokens()
+    if key not in tokens:
+        return False, "Invalid key."
+    token = tokens[key]
+    if token.get("used"):
+        return False, "Key already used."
+    if time.time() > token.get("expires_at", 0):
+        return False, "Key expired."
+    return True, None
+
+
+def consume_access_key(key: str, uid: int) -> None:
+    tokens = load_tokens()
+    if key in tokens:
+        tokens[key]["used"] = True
+        tokens[key]["used_by"] = uid
+        tokens[key]["used_at"] = time.time()
+        save_tokens(tokens)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def esc(text: str) -> str:
+    return html.escape(str(text), quote=False)
+
+
+def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(label, callback_data=data) for label, data in row] for row in rows]
+    )
+
+
+def with_nav(rows: list[list[tuple[str, str]]], extra_back: bool = True) -> list[list[tuple[str, str]]]:
+    nav = []
+    if extra_back:
+        nav.append([("Back", "nav:back")])
+    nav.append([("Exit", "nav:exit")])
+    return rows + nav
+
+
+# ---------------------------------------------------------------------------
+# Sending helpers (HTML + optional GIF)
+# ---------------------------------------------------------------------------
+async def send_msg(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None, gif_key=None):
+    chat_id = update.effective_chat.id
+    if gif_key and gif_key in GIFS:
+        try:
+            await context.bot.send_animation(
+                chat_id=chat_id, animation=GIFS[gif_key], caption=text,
+                parse_mode=ParseMode.HTML, reply_markup=reply_markup,
+            )
+            return
+        except Exception as exc:
+            log.debug("gif send failed: %s", exc)
+    await context.bot.send_message(
+        chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup,
+    )
+
+
+async def safe_edit(query, text: str, reply_markup=None):
+    try:
+        await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        return
+    except BadRequest as exc:
+        msg = str(exc).lower()
+        if "can't edit message" in msg or "object expected as reply markup" in msg:
+            try:
+                await query.edit_message_caption(caption=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+                return
+            except Exception as exc2:
+                log.debug("caption edit also failed: %s", exc2)
+        if "message is not modified" in str(exc).lower():
+            return
+        log.debug("edit failed: %s", exc)
+    except Exception as exc:
+        log.debug("edit failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Draft
+# ---------------------------------------------------------------------------
+def new_draft(cfg: dict, host: str | None = None, project: str | None = None, region: str | None = None) -> dict:
+    default_name = str(cfg.get("default_service_name") or "saeka")
+    name = host.split(".")[0] if host else default_name
+    name = re.sub(r"[^a-z0-9-]", "", name.lower()).strip("-")[:30] or default_name
+    return {
+        "step": "engine",
+        "engine": "1",
+        "ads": "1",
+        "mode": "1",
+        "region": region or str(cfg.get("default_region") or REGIONS[0]),
+        "name": name,
+        "project": project or "",
+        "host": host or "",
+        "password": "",
+    }
+
+
+def draft_summary(d: dict) -> str:
+    eng = ENGINES.get(d["engine"], ("Unknown", "", False))[0]
+    lines = [
+        f"<b>Project:</b> <code>{esc(d.get('project', '-'))}</code>",
+        f"<b>Engine:</b> {esc(eng)}",
+    ]
+    if not ENGINES.get(d["engine"], ("", "", True))[2]:
+        lines.append(f"<b>Ads:</b> {ADS_CHOICES.get(d['ads'], 'No ads')}")
+    lines += [
+        f"<b>Size:</b> {MODES[d['mode']][0]} ({MODES[d['mode']][1]})",
+        f"<b>Region:</b> <code>{esc(d['region'])}</code>",
+        f"<b>Service:</b> <code>{esc(d['name'])}</code>",
+    ]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -284,83 +429,44 @@ def extract_region_hint(text: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Sending helpers (HTML + optional GIF)
+# Screens: Access control
 # ---------------------------------------------------------------------------
-async def send_msg(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None, gif_key=None):
-    chat_id = update.effective_chat.id
-    if gif_key and gif_key in GIFS:
-        try:
-            await context.bot.send_animation(
-                chat_id=chat_id, animation=GIFS[gif_key], caption=text,
-                parse_mode=ParseMode.HTML, reply_markup=reply_markup,
-            )
-            return
-        except Exception as exc:
-            log.debug("gif send failed: %s", exc)
-    await context.bot.send_message(
-        chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup,
+async def show_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "<b>Access Pending</b>\n\n"
+        "Your account has been registered and is awaiting admin approval.\n\n"
+        "<b>Options:</b>\n"
+        "1. Wait for admin to approve your request.\n"
+        "2. Enter an access key if you have one (provided by admin).\n\n"
+        "Send your access key here, or wait for approval."
+    )
+    await send_msg(
+        update, context, text,
+        reply_markup=kb([
+            [("Exit", "nav:exit")],
+        ]),
+        gif_key="pending",
     )
 
 
-async def safe_edit(query, text: str, reply_markup=None):
-    """Edit a message. Handles both text messages and animation/media messages."""
-    try:
-        await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-        return
-    except BadRequest as exc:
-        msg = str(exc).lower()
-        if "can't edit message" in msg or "message is not modified" not in msg:
-            # Original message might be an animation — try caption
-            try:
-                await query.edit_message_caption(caption=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-                return
-            except Exception as exc2:
-                log.debug("caption edit also failed: %s", exc2)
-        if "message is not modified" in str(exc).lower():
-            return
-        log.debug("edit failed: %s", exc)
-    except Exception as exc:
-        log.debug("edit failed: %s", exc)
+async def show_access_key_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "<b>Access Key</b>\n\n"
+        "Enter your access key to gain immediate access.\n"
+        "Keys are provided by the administrator.\n\n"
+        "Send the key below, or tap <b>Exit</b>."
+    )
+    context.user_data["awaiting_key"] = True
+    await send_msg(
+        update, context, text,
+        reply_markup=kb([
+            [("Exit", "nav:exit")],
+        ]),
+    )
 
 
 # ---------------------------------------------------------------------------
-# Draft
-# ---------------------------------------------------------------------------
-def new_draft(cfg: dict, host: str | None = None, project: str | None = None, region: str | None = None) -> dict:
-    default_name = str(cfg.get("default_service_name") or "saeka")
-    name = host.split(".")[0] if host else default_name
-    name = re.sub(r"[^a-z0-9-]", "", name.lower()).strip("-")[:30] or default_name
-    return {
-        "step": "engine",
-        "engine": "1",
-        "ads": "1",
-        "mode": "1",
-        "region": region or str(cfg.get("default_region") or REGIONS[0]),
-        "name": name,
-        "project": project or "",
-        "host": host or "",
-        "password": "",
-    }
-
-
-def draft_summary(d: dict) -> str:
-    eng = ENGINES.get(d["engine"], ("Unknown", "", False))[0]
-    lines = [
-        f"<b>Project:</b> <code>{esc(d.get('project', '-'))}</code>",
-        f"<b>Engine:</b> {esc(eng)}",
-    ]
-    if not ENGINES.get(d["engine"], ("", "", True))[2]:
-        lines.append(f"<b>Ads:</b> {ADS_CHOICES.get(d['ads'], 'No ads')}")
-    lines += [
-        f"<b>Size:</b> {MODES[d['mode']][0]} ({MODES[d['mode']][1]})",
-        f"<b>Region:</b> <code>{esc(d['region'])}</code>",
-        f"<b>Service:</b> <code>{esc(d['name'])}</code>",
-    ]
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Screens
+# Screens: Main flow
 # ---------------------------------------------------------------------------
 async def show_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -377,7 +483,6 @@ async def show_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update, context, text,
         reply_markup=kb([
             [("Deploy", "m:deploy")],
-            [("Help", "m:help")],
             [("Exit", "nav:exit")],
         ]),
         gif_key="welcome",
@@ -425,7 +530,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    record_user(update)
+    status = register_or_update_user(user)
 
     blocked, reason = is_blocked(user.id)
     if blocked:
@@ -435,13 +540,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    allowed = is_allowed(user.id, user.username)
-    if not allowed:
-        await update.effective_message.reply_text(
-            "<b>Access restricted.</b> You are not on the allowed users list.\n"
-            "Contact the administrator to be added.",
-            parse_mode=ParseMode.HTML,
-        )
+    if status == "pending":
+        await show_pending(update, context)
+        return
+    if status != "approved":
+        await show_access_key_input(update, context)
         return
 
     context.user_data.clear()
@@ -466,6 +569,30 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
+def record_user(update: Update) -> None:
+    user = update.effective_user
+    if not user:
+        return
+    users = load_users()
+    key = str(user.id)
+    if key not in users:
+        users[key] = {
+            "id": user.id,
+            "username": user.username or "",
+            "first_name": user.first_name or "",
+            "last_name": user.last_name or "",
+            "status": "pending",
+            "joined_at": time.time(),
+            "approved_at": None,
+            "approved_by": None,
+            "token": None,
+        }
+        save_users(users)
+    else:
+        users[key]["last_seen"] = time.time()
+        save_users(users)
+
+
 # ---------------------------------------------------------------------------
 # Main button handler
 # ---------------------------------------------------------------------------
@@ -480,6 +607,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "nav:exit":
         context.user_data.pop("draft", None)
+        context.user_data.pop("awaiting_key", None)
         await safe_edit(query, "<b>Session closed.</b>\nSend /start to begin again.")
         return
     if data == "nav:back":
@@ -499,17 +627,17 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await show_admin_users(query, context)
         return
+    if data == "admin:pending":
+        if not is_admin_session(query.from_user.id):
+            await query.answer("Admin login required.", show_alert=True)
+            return
+        await show_admin_pending(query, context)
+        return
     if data == "admin:block":
         if not is_admin_session(query.from_user.id):
             await query.answer("Admin login required.", show_alert=True)
             return
         await show_admin_block(query, context)
-        return
-    if data == "admin:add":
-        if not is_admin_session(query.from_user.id):
-            await query.answer("Admin login required.", show_alert=True)
-            return
-        await show_admin_add(query, context)
         return
     if data == "admin:unblock":
         if not is_admin_session(query.from_user.id):
@@ -517,9 +645,35 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await show_admin_unblock(query, context)
         return
+    if data == "admin:key":
+        if not is_admin_session(query.from_user.id):
+            await query.answer("Admin login required.", show_alert=True)
+            return
+        await show_admin_key(query, context)
+        return
     if data == "admin:logout":
         clear_admin_session(query.from_user.id)
         await safe_edit(query, "<b>Logged out.</b> Send /admin to login again.")
+        return
+
+    # Approve/reject user
+    if data.startswith("approve:"):
+        if not is_admin_session(query.from_user.id):
+            await query.answer("Admin login required.", show_alert=True)
+            return
+        uid = int(data.split(":", 1)[1])
+        set_user_status(uid, "approved", query.from_user.id)
+        await query.answer(f"User {uid} approved.")
+        await show_admin_pending(query, context)
+        return
+    if data.startswith("reject:"):
+        if not is_admin_session(query.from_user.id):
+            await query.answer("Admin login required.", show_alert=True)
+            return
+        uid = int(data.split(":", 1)[1])
+        set_user_status(uid, "rejected")
+        await query.answer(f"User {uid} rejected.")
+        await show_admin_pending(query, context)
         return
 
     # Unblock specific user
@@ -535,12 +689,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_admin_unblock(query, context)
         return
 
+    # Main flow
     if data == "m:deploy":
         context.user_data["draft"] = new_draft(cfg)
         await show_link_prompt(update, context)
-        return
-    if data == "m:help":
-        await show_help(update, context)
         return
     if data == "m:exit":
         context.user_data.pop("draft", None)
@@ -605,8 +757,9 @@ async def show_admin_panel(query, context: ContextTypes.DEFAULT_TYPE):
         query, text,
         reply_markup=kb([
             [("Live Users", "admin:users")],
+            [("Pending Approvals", "admin:pending")],
             [("Block User", "admin:block"), ("Unblock User", "admin:unblock")],
-            [("Add Allowed User", "admin:add")],
+            [("Generate Access Key", "admin:key")],
             [("Logout", "admin:logout")],
         ]),
     )
@@ -620,12 +773,13 @@ async def show_admin_users(query, context: ContextTypes.DEFAULT_TYPE):
         lines.append("No users recorded yet.")
     else:
         for uid, info in sorted(users.items(), key=lambda x: x[1].get("last_seen", 0), reverse=True):
+            status = info.get("status", "unknown")
             is_blk = uid in blocked
-            status = " <i>[BLOCKED]</i>" if is_blk else ""
+            status_tag = f" <i>[BLOCKED]</i>" if is_blk else f" [{status.upper()}]"
             uname = info.get("username") or "-"
             fname = info.get("first_name") or "-"
             lines.append(
-                f"• <code>{uid}</code> | @{esc(uname)} | {esc(fname)}{status}"
+                f"• <code>{uid}</code> | @{esc(uname)} | {esc(fname)}{status_tag}"
             )
     text = "<b>Live Users</b>\n\n" + "\n".join(lines[:30])
     if len(lines) > 30:
@@ -637,6 +791,29 @@ async def show_admin_users(query, context: ContextTypes.DEFAULT_TYPE):
             [("Exit", "nav:exit")],
         ]),
     )
+
+
+async def show_admin_pending(query, context: ContextTypes.DEFAULT_TYPE):
+    users = load_users()
+    pending = {uid: info for uid, info in users.items() if info.get("status") == "pending"}
+    if not pending:
+        text = "<b>Pending Approvals</b>\n\nNo pending users."
+        await safe_edit(
+            query, text,
+            reply_markup=kb([
+                [("Back", "admin:panel")],
+                [("Exit", "nav:exit")],
+            ]),
+        )
+        return
+    rows = []
+    for uid, info in pending.items():
+        name = info.get("first_name") or info.get("username") or uid
+        rows.append([(f"Approve {name}", f"approve:{uid}"), (f"Reject {name}", f"reject:{uid}")])
+    rows.append([("Back", "admin:panel")])
+    rows.append([("Exit", "nav:exit")])
+    text = "<b>Pending Approvals</b>\n\nSelect a user to approve or reject:"
+    await safe_edit(query, text, reply_markup=kb(rows))
 
 
 async def show_admin_block(query, context: ContextTypes.DEFAULT_TYPE):
@@ -672,20 +849,18 @@ async def show_admin_unblock(query, context: ContextTypes.DEFAULT_TYPE):
     text = "<b>Unblock User</b>\n\nSelect a user to unblock:"
     rows.append([("Back", "admin:panel")])
     rows.append([("Exit", "nav:exit")])
-    await safe_edit(
-        query, text,
-        reply_markup=kb(rows),
-    )
+    await safe_edit(query, text, reply_markup=kb(rows))
 
 
-async def show_admin_add(query, context: ContextTypes.DEFAULT_TYPE):
+async def show_admin_key(query, context: ContextTypes.DEFAULT_TYPE):
+    key = create_access_key(query.from_user.id)
     text = (
-        "<b>Add Allowed User</b>\n\n"
-        "Send the Telegram user ID to allow.\n"
-        "Optionally add a username after a space.\n\n"
-        "Example: <code>123456789 john_doe</code>"
+        "<b>Access Key Generated</b>\n\n"
+        f"<b>Key:</b> <code>{esc(key)}</code>\n"
+        "<b>Expires:</b> 24 hours\n\n"
+        "Give this key to a user to grant them immediate access.\n"
+        "The key can be used only once."
     )
-    context.user_data["admin_action"] = "add"
     await safe_edit(
         query, text,
         reply_markup=kb([
@@ -832,12 +1007,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML,
             )
             return
-        if not is_allowed(user.id, user.username):
-            await update.effective_message.reply_text(
-                "<b>Access restricted.</b> You are not on the allowed users list.\n"
-                "Contact the administrator to be added.",
-                parse_mode=ParseMode.HTML,
-            )
+        status = get_user_status(user.id)
+        if status not in ("approved",):
+            # Show pending or key input again
+            if status == "pending":
+                await show_pending(update, context)
+            else:
+                await show_access_key_input(update, context)
             return
 
     cfg = load_config()
@@ -855,6 +1031,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             context.user_data.pop("awaiting_admin_pass", None)
             await msg.reply_text("<b>Wrong password.</b> Access denied.", parse_mode=ParseMode.HTML)
+        return
+
+    # Access key input
+    if context.user_data.get("awaiting_key"):
+        key = text.strip()
+        valid, message = validate_access_key(key)
+        if valid:
+            consume_access_key(key, msg.from_user.id)
+            set_user_status(msg.from_user.id, "approved")
+            context.user_data.pop("awaiting_key", None)
+            await msg.reply_text("<b>Access granted.</b> Welcome!", parse_mode=ParseMode.HTML)
+            await show_welcome(update, context)
+        else:
+            await msg.reply_text(f"<b>Invalid key:</b> {esc(message or 'Unknown error')}", parse_mode=ParseMode.HTML)
         return
 
     # Admin action inputs (block/add)
@@ -875,12 +1065,22 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML,
             )
         else:
-            allowed = load_allowed()
-            if uid not in allowed:
-                allowed.append(uid)
-                save_allowed(allowed)
+            # Add as approved user directly
+            users = load_users()
+            users[uid] = {
+                "id": int(uid),
+                "username": "",
+                "first_name": "",
+                "last_name": "",
+                "status": "approved",
+                "joined_at": time.time(),
+                "approved_at": time.time(),
+                "approved_by": msg.from_user.id,
+                "token": None,
+            }
+            save_users(users)
             await msg.reply_text(
-                f"<b>User {uid} added to allowed list.</b>",
+                f"<b>User {uid} added and approved.</b>",
                 parse_mode=ParseMode.HTML,
             )
         context.user_data.pop("admin_action", None)
@@ -940,8 +1140,9 @@ async def show_admin_panel_from_msg(msg, context: ContextTypes.DEFAULT_TYPE):
         text, parse_mode=ParseMode.HTML,
         reply_markup=kb([
             [("Live Users", "admin:users")],
+            [("Pending Approvals", "admin:pending")],
             [("Block User", "admin:block"), ("Unblock User", "admin:unblock")],
-            [("Add Allowed User", "admin:add")],
+            [("Generate Access Key", "admin:key")],
             [("Logout", "admin:logout")],
         ]),
     )
