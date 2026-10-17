@@ -155,7 +155,7 @@ echo -e "  ${BOLD}${WHITE}4N1 FAST DEPLOYER v2 (PER-ENGINE)${RESET}"
 echo -e "  ${MAGENTA}ENGINEERED BY SAEKA TOJIRP${RESET}"
 echo ""
 
-PROJECT_ID=$(gcloud config get-value project 2>/dev/null | tr -d '[:space:]')
+PROJECT_ID="${DEPLOY_PROJECT:-$(gcloud config get-value project 2>/dev/null | tr -d '[:space:]')}"
 if [ -z "$PROJECT_ID" ]; then
     echo -e "  ${RED}ERROR: No active GCP project detected. Please run 'gcloud init'.${RESET}"
     exit 1
