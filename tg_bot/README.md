@@ -69,16 +69,21 @@ python3 bot.py
 
 ```
 /deploy
-→ send host (e.g. saeka-xyz.a.run.app)
+→ (optional) paste a fallback link — e.g. a Qwiklabs / console.cloud.google.com URL:
+   https://www.skills.google/google_sso?fallback=https%3A%2F%2Faccounts.google.com%2F...
+   The bot reads it for context (best-effort host / project hint). Send /skip to skip.
 → pick engine (HAProxy / Envoy / Caddy / H2O / Traefik / OpenResty)
 → pick ads mode (No ads / Ads)
 → pick region
 → send service name
 → pick tier (Browsing / Streaming / Gaming)
 → confirm (✅ Deploy / ❌ Cancel)
-→ bot builds image, deploys to Cloud Run
-→ bot sends live URL + client links (vless/trojan/vmess/ss)
+→ bot builds image (Cloud Build) and deploys (Cloud Run)
+→ bot fetches the live Cloud Run URL
+→ bot generates client links (vless/trojan/vmess/ss) and sends them back
 ```
+
+The real deploy target is the live Cloud Run service URL obtained after deployment — not the fallback link. The fallback link is context only.
 
 ## Security notes
 

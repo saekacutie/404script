@@ -3,31 +3,29 @@
 saeka-tg-bot — Telegram bot that deploys the 4N1 FAST DEPLOYER stack to GCP Cloud Run.
 
 Flow:
-  1. User sends /deploy (or pastes a fallback host link).
-  2. Bot asks for the target host (Cloud Run / LB host to generate links for).
-  3. User picks engine, ads mode, region, service name, tier via inline keyboards.
-  4. Bot runs the deployment non-interactively (gcloud builds + gcloud run deploy),
-     streaming progress back as Telegram messages.
-  5. Bot generates client links (vless/trojan/vmess/ss) and sends them to the user.
+  1. User sends /deploy OR pastes a fallback link (e.g. a Qwiklabs Google SSO URL).
+  2. Bot extracts any usable host/project hint from the link (best-effort; the real
+     deploy target is the Cloud Run URL obtained after deployment).
+  3. Bot shows inline selection: engine → ads mode → region → service name → tier.
+  4. User confirms → bot builds image (Cloud Build) → deploys (Cloud Run).
+  5. Bot fetches the live service URL, generates client links (vless/trojan/vmess/ss),
+     and sends everything back to the user.
 
-Only required setup: drop your BOT_TOKEN into .env (or BOT_TOKEN env var) and
-give the bot's service account Cloud Run / Cloud Build / Compute permissions.
+Only required setup: BOT_TOKEN + GCP_PROJECT_ID in .env (or env).
 """
 
 from __future__ import annotations
 
-import asyncio
 import html
-import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote, urlparse, parse_qs
 
 from telegram import (
     InlineKeyboardButton,
@@ -51,7 +49,7 @@ from telegram.ext import (
 # Conversation states
 # ---------------------------------------------------------------------------
 (
-    STATE_HOST,
+    STATE_LINK,
     STATE_ENGINE,
     STATE_ADS,
     STATE_REGION,
@@ -114,6 +112,47 @@ def is_admin(user_id: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Fallback-link processing (best-effort extraction of host / project hint)
+# ---------------------------------------------------------------------------
+def extract_host_from_link(raw: str) -> Optional[str]:
+    """Return a bare host if the link looks like a direct service URL, else None."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    # Strip message-wrap markup if user pasted it with angle brackets
+    raw = raw.strip("<>")
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.hostname:
+        host = parsed.hostname
+    else:
+        # No scheme: treat whole thing as potential host
+        host = raw.split("/")[0]
+    host = host.lower()
+    # Reject obvious non-host SSO/consent domains
+    bad = {
+        "www.skills.google", "accounts.google.com", "console.cloud.google.com",
+        "myaccount.google.com", "mail.google.com",
+    }
+    if host in bad:
+        return None
+    # Must look like a hostname (contain a dot, no spaces)
+    if "." not in host or " " in host:
+        return None
+    return host
+
+
+def extract_project_hint(raw: str) -> Optional[str]:
+    """Best-effort: pull a GCP project id from qwiklabs/console URLs."""
+    m = re.search(r"[?&]project=([^&]+)", raw)
+    if m:
+        return unquote(m.group(1))
+    m = re.search(r"qwiklabs-gcp-[a-z0-9]+", raw)
+    if m:
+        return m.group(0)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Deployment logic (non-interactive, mirrors deploy.sh)
 # ---------------------------------------------------------------------------
 class Deployer:
@@ -121,10 +160,8 @@ class Deployer:
         self.project_id = project_id
         self.region = region
         self.repo_dir = repo_dir
-        self.deploy_sh = os.path.join(repo_dir, "deploy.sh")
 
     def _run(self, args: list[str], label: str, timeout: int = 1800) -> tuple[bool, str]:
-        """Run a command, stream output, return (ok, combined_output)."""
         lines: list[str] = []
         try:
             proc = subprocess.Popen(
@@ -133,8 +170,7 @@ class Deployer:
             )
             assert proc.stdout is not None
             for raw in proc.stdout:
-                line = raw.rstrip("\n")
-                lines.append(line)
+                lines.append(raw.rstrip("\n"))
             proc.wait(timeout=timeout)
             ok = proc.returncode == 0
             return ok, "\n".join(lines)
@@ -239,13 +275,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "<b>saeka-tg-bot — 4N1 FAST DEPLOYER</b>\n\n"
         "Deploy your proxy stack to GCP Cloud Run from Telegram.\n\n"
         "Commands:\n"
-        "• /deploy — start a new deployment\n"
+        "• /deploy — start a new deployment (send a fallback link first, or just begin)\n"
         "• /cancel — cancel current operation\n"
-        "• /status — show bot config\n\n"
-        "Send /deploy to begin, or paste a fallback host link after /deploy to use it directly."
+        "• /status — show bot config\n"
+        "• /help — show this message\n\n"
+        "Flow: fallback link (optional) → engine → ads mode → region → service name → tier → confirm → deploy → client links\n"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
-    return STATE_HOST
+    return ConversationHandler.END
 
 
 async def deploy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -256,32 +293,58 @@ async def deploy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     context.user_data["started"] = time.time()
     text = (
-        "<b>Step 1 of 6 — Target host</b>\n"
-        "Send the host (fallback link) to generate client links for.\n"
-        "Example: <code>saeka-xyz.a.run.app</code> or <code>https://saeka-xyz.a.run.app</code>\n\n"
+        "<b>1) Fallback link (optional)</b>\n"
+        "Paste a fallback link (e.g. a Qwiklabs / console.cloud.google.com URL) or send "
+        "<code>/skip</code> to begin without one.\n\n"
+        "The bot reads it for context only — the real deploy target is your Cloud Run "
+        "service URL, obtained after deployment.\n\n"
         "Or send /cancel to abort."
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
-    return STATE_HOST
+    return STATE_LINK
 
 
-async def host_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def link_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     raw = (update.effective_message.text or "").strip()
-    host = raw.replace("https://", "").replace("http://", "").split("/")[0].strip()
-    if not host or " " in host:
-        await update.effective_message.reply_text("Invalid host. Send a plain host like <code>saeka-xyz.a.run.app</code>.", parse_mode=ParseMode.HTML)
-        return STATE_HOST
-    context.user_data["host"] = host
-    keyboard = [
-        [InlineKeyboardButton(f"{name} ({engine})", callback_data=f"eng:{eng}")]
-        for _, eng, name in ENGINES
-    ]
+    host = extract_host_from_link(raw)
+    proj = extract_project_hint(raw)
+    context.user_data["fallback_link"] = raw
+    context.user_data["fallback_host"] = host
+    context.user_data["project_hint"] = proj
+
+    bits = []
+    if host:
+        bits.append(f"Host detected: <code>{esc(host)}</code>")
+    if proj:
+        bits.append(f"Project hint: <code>{esc(proj)}</code>")
+    if not bits:
+        bits.append("No direct host detected — that's fine, the live URL comes after deploy.")
+
     await update.effective_message.reply_text(
-        f"<b>Step 2 of 6 — Proxy engine</b>\nHost: <code>{esc(host)}</code>\nChoose the engine to deploy:",
+        "<b>Link processed.</b>\n" + "\n".join(bits) +
+        "\n\nNow choose the proxy engine to deploy:",
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=engine_keyboard(),
     )
     return STATE_ENGINE
+
+
+async def skip_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["fallback_link"] = ""
+    context.user_data["fallback_host"] = None
+    context.user_data["project_hint"] = None
+    await update.effective_message.reply_text(
+        "Skipping link. Choose the proxy engine to deploy:",
+        reply_markup=engine_keyboard(),
+    )
+    return STATE_ENGINE
+
+
+def engine_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{name} ({engine})", callback_data=f"eng:{eng}")]
+        for _, eng, name in ENGINES
+    ])
 
 
 async def engine_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -289,19 +352,22 @@ async def engine_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await query.answer()
     _, eng = query.data.split(":", 1)
     emap = {eng: (label, disp) for label, eng, disp in ENGINES}
-    label, disp = emap[eng]
+    _, disp = emap[eng]
     context.user_data["engine"] = eng
     context.user_data["engine_label"] = disp
-    keyboard = [
-        [InlineKeyboardButton(name, callback_data=f"ads:{mode}")]
-        for name, mode, _ in ADS_MODES
-    ]
     await query.edit_message_text(
-        f"<b>Step 3 of 6 — Ads mode</b>\nEngine: <code>{esc(disp)}</code>\nChoose ads mode:",
+        f"<b>2) Ads mode</b>\nEngine: <code>{esc(disp)}</code>\nChoose ads mode:",
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=ads_keyboard(),
     )
     return STATE_ADS
+
+
+def ads_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(name, callback_data=f"ads:{mode}")]
+        for name, mode, _ in ADS_MODES
+    ])
 
 
 async def ads_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -309,21 +375,25 @@ async def ads_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await query.answer()
     _, mode = query.data.split(":", 1)
     amap = {mode: (label, disp) for label, mode, disp in ADS_MODES}
-    label, disp = amap[mode]
+    _, disp = amap[mode]
     context.user_data["ads_mode"] = mode
     context.user_data["ads_label"] = disp
-    keyboard = [
+    await query.edit_message_text(
+        f"<b>3) Region</b>\nAds mode: <code>{esc(disp)}</code>\nChoose deploy region:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=region_keyboard(),
+    )
+    return STATE_REGION
+
+
+def region_keyboard() -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton(region, callback_data=f"reg:{region}")]
         for region, _ in REGIONS
     ]
     # two per row
-    rows = [keyboard[i:i + 2] for i in range(0, len(keyboard), 2)]
-    await query.edit_message_text(
-        f"<b>Step 4 of 6 — Region</b>\nAds mode: <code>{esc(disp)}</code>\nChoose deploy region:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
-    return STATE_REGION
+    paired = [rows[i:i + 2] for i in range(0, len(rows), 2)]
+    return InlineKeyboardMarkup(paired)
 
 
 async def region_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -332,7 +402,7 @@ async def region_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     _, region = query.data.split(":", 1)
     context.user_data["region"] = region
     await query.edit_message_text(
-        f"<b>Step 5 of 6 — Service name</b>\nRegion: <code>{esc(region)}</code>\n"
+        f"<b>4) Service name</b>\nRegion: <code>{esc(region)}</code>\n"
         "Send a service name (e.g. <code>saeka</code>) or blank for default.",
         parse_mode=ParseMode.HTML,
         reply_markup=ReplyKeyboardRemove(),
@@ -345,16 +415,19 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     name = re.sub(r"[^a-z0-9-]", "-", name.lower())
     context.user_data["service_name"] = name
     context.user_data["image_tag"] = f"{name}-{context.user_data['engine']}"
-    keyboard = [
-        [InlineKeyboardButton(name, callback_data=f"tier:{i}")]
-        for i, (name_label, *_rest) in enumerate(TIERS)
-    ]
     await update.effective_message.reply_text(
-        f"<b>Step 6 of 6 — Tier</b>\nService: <code>{esc(name)}</code>\nChoose sizing tier:",
+        f"<b>5) Tier</b>\nService: <code>{esc(name)}</code>\nChoose sizing tier:",
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=tier_keyboard(),
     )
     return STATE_TIER
+
+
+def tier_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data=f"tier:{i}")]
+        for i, (label, *_rest) in enumerate(TIERS)
+    ])
 
 
 async def tier_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -368,11 +441,9 @@ async def tier_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         "cpu": cpu, "ram": ram, "concurrency": concurrency,
         "max_instances": max_instances, "tier": mode_name, "min_instances": 1,
     })
-    # summary + confirm
     ud = context.user_data
     text = (
         "<b>Confirm deployment</b>\n\n"
-        f"• Host: <code>{esc(ud['host'])}</code>\n"
         f"• Engine: <code>{esc(ud['engine_label'])}</code> ({ud['engine']})\n"
         f"• Ads: <code>{esc(ud['ads_label'])}</code>\n"
         f"• Region: <code>{esc(ud['region'])}</code>\n"
@@ -432,7 +503,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     await send_progress(update, context, "✅ Deployed to Cloud Run.")
 
-    # 3. Get URL
+    # 3. Get live URL (the real deploy target)
     url = deployer.get_service_url(service_name)
     if not url:
         await send_progress(update, context, "⚠️ Deployed but could not fetch service URL.")
@@ -440,6 +511,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     clean_host = url.replace("https://", "")
     ud["deployed_host"] = clean_host
+
     await send_progress(
         update, context,
         f"✅ <b>Live:</b> <code>{esc(url)}</code>\n"
@@ -448,7 +520,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         f"Tier: <code>{esc(ud['tier'])}</code>",
     )
 
-    # 4. Generate client links
+    # 4. Generate client links using the real live host
     await send_progress(update, context, "🔗 <b>Generating client links</b>...")
     ok, out = deployer.generate_links(clean_host)
     if ok:
@@ -459,6 +531,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await send_progress(
         update, context,
         f"🎉 <b>Deployment complete!</b>\n"
+        f"Live URL: <code>{esc(url)}</code>\n"
         f"Use <code>./generate-client-links.sh {clean_host}</code> to regenerate links anytime.\n"
         f"Send /deploy to deploy again.",
     )
@@ -487,21 +560,21 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text("Send /deploy to start a deployment, or /help for info.")
-
-
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "<b>saeka-tg-bot help</b>\n\n"
-        "/deploy — Start a new deployment (interactive selection)\n"
+        "/deploy — Start a new deployment (send fallback link first, or /skip)\n"
         "/cancel — Cancel the current deployment flow\n"
         "/status — Show bot configuration\n"
         "/help — Show this message\n\n"
-        "Flow: host → engine → ads mode → region → service name → tier → confirm → deploy → links\n"
-        "The bot runs your existing 4N1 deploy logic on GCP Cloud Run and returns client links."
+        "Flow: fallback link (optional) → engine → ads mode → region → service name → tier → confirm → deploy → client links\n"
+        "The bot runs your existing 4N1 deploy logic on GCP Cloud Run and returns client links.\n"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text("Send /deploy to start a deployment, or /help for info.")
 
 
 def main() -> None:
@@ -516,8 +589,9 @@ def main() -> None:
     conv = ConversationHandler(
         entry_points=[CommandHandler("deploy", deploy_cmd)],
         states={
-            STATE_HOST: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, host_received),
+            STATE_LINK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, link_received),
+                CommandHandler("skip", skip_link),
                 CommandHandler("cancel", cancel),
             ],
             STATE_ENGINE: [CallbackQueryHandler(engine_chosen, pattern=r"^eng:")],
