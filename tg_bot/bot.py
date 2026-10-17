@@ -1007,14 +1007,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML,
             )
             return
-        status = get_user_status(user.id)
-        if status not in ("approved",):
-            # Show pending or key input again
-            if status == "pending":
-                await show_pending(update, context)
-            else:
-                await show_access_key_input(update, context)
-            return
 
     cfg = load_config()
     msg = update.effective_message
