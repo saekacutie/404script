@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 saeka-premium-bot — 4N1 FAST DEPLOYER Telegram Bot (Premium Edition)
-Button-only interaction. Commands: /start only.
+Public bot with admin panel (/admin, saeka/saeka404).
+Button-only interaction. Commands: /start, /admin.
 Welcome -> Deploy | Exit -> Fallback link -> Selection -> Deploy -> Links.
 HTML-styled fonts, GIF animations, Back/Exit on every screen.
+Admin: live users, block users, add allowed users.
 """
 
 from __future__ import annotations
@@ -93,6 +95,9 @@ SPINNER_RE = re.compile(r"\.\.\. [|/\\-] \d+s\s*$")
 LINK_RE = re.compile(r"(?:vless|vmess|trojan|ss)://[^\s\"'<>]+")
 HOST_RE = re.compile(r"^[A-Za-z0-9.-]+$")
 
+ADMIN_USER = "saeka"
+ADMIN_PASS = "saeka404"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -116,77 +121,117 @@ def with_nav(rows: list[list[tuple[str, str]]], extra_back: bool = True) -> list
 
 
 # ---------------------------------------------------------------------------
-# Config / auth
+# User storage
 # ---------------------------------------------------------------------------
-def load_config() -> dict:
-    cfg = {
-        "repo_dir": "./404script",
-        "allowed_user_ids": [],
-        "default_region": "us-central1",
-        "default_service_name": "saeka",
-        "deploy_timeout_seconds": 3600,
-        "progress_interval_seconds": 3,
-    }
-    for path in (BASE / "config.yaml", DATA / "settings.json"):
-        if not path.exists():
-            continue
-        try:
-            raw = path.read_text(encoding="utf-8")
-            loaded = json.loads(raw) if path.suffix == ".json" else yaml.safe_load(raw)
-            cfg.update({k: v for k, v in (loaded or {}).items() if v is not None})
-        except Exception as exc:
-            log.warning("could not read %s: %s", path, exc)
-    return cfg
+USERS_FILE = DATA / "users.json"
+BLOCKED_FILE = DATA / "blocked.json"
+ALLOWED_FILE = DATA / "allowed.json"
+ADMIN_SESSIONS_FILE = DATA / "admin_sessions.json"
 
 
-def repo_dir(cfg: dict) -> Path:
-    p = Path(str(cfg["repo_dir"])).expanduser()
-    return p if p.is_absolute() else (BASE / p).resolve()
-
-
-def get_owner() -> int | None:
-    f = DATA / "owner.json"
-    if not f.exists():
-        return None
+def _load_json(path: Path, default):
     try:
-        return int(json.loads(f.read_text())["id"])
-    except Exception:
-        return None
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("could not read %s: %s", path, exc)
+    return default
 
 
-def set_owner(uid: int) -> None:
-    f = DATA / "owner.json"
-    f.write_text(json.dumps({"id": uid}))
+def _save_json(path: Path, data) -> None:
+    try:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        log.warning("could not write %s: %s", path, exc)
 
 
-def is_authorized(uid: int, cfg: dict) -> bool:
-    allowed = [int(x) for x in (cfg.get("allowed_user_ids") or [])]
-    if allowed:
-        return uid in allowed
-    owner = get_owner()
-    if owner is None:
-        set_owner(uid)
+def load_users() -> dict:
+    return _load_json(USERS_FILE, {})
+
+
+def save_users(users: dict) -> None:
+    _save_json(USERS_FILE, users)
+
+
+def load_blocked() -> dict:
+    return _load_json(BLOCKED_FILE, {})
+
+
+def save_blocked(blocked: dict) -> None:
+    _save_json(BLOCKED_FILE, blocked)
+
+
+def load_allowed() -> list:
+    return _load_json(ALLOWED_FILE, [])
+
+
+def save_allowed(allowed: list) -> None:
+    _save_json(ALLOWED_FILE, allowed)
+
+
+def load_admin_sessions() -> dict:
+    return _load_json(ADMIN_SESSIONS_FILE, {})
+
+
+def save_admin_sessions(sessions: dict) -> None:
+    _save_json(ADMIN_SESSIONS_FILE, sessions)
+
+
+def is_blocked(uid: int) -> tuple[bool, str | None]:
+    blocked = load_blocked()
+    key = str(uid)
+    if key in blocked:
+        return True, blocked[key].get("reason")
+    return False, None
+
+
+def is_allowed(uid: int, username: str | None) -> bool:
+    # Public by default: everyone can use unless blocked
+    blocked, _ = is_blocked(uid)
+    if blocked:
+        return False
+    allowed = load_allowed()
+    # If allowed list is empty, everyone is allowed (public)
+    if not allowed:
         return True
-    return uid == owner
+    return str(uid) in allowed or (username and username in allowed)
 
 
-def authorized(fn):
-    @functools.wraps(fn)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        if user is None or not is_authorized(user.id, load_config()):
-            text = "<b>Access denied.</b>"
-            if update.callback_query:
-                await update.callback_query.answer("Not authorized.", show_alert=True)
-                try:
-                    await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML)
-                except Exception:
-                    pass
-            elif update.effective_message:
-                await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
-            return
-        return await fn(update, context)
-    return wrapper
+def record_user(update: Update) -> None:
+    user = update.effective_user
+    if not user:
+        return
+    users = load_users()
+    key = str(user.id)
+    users[key] = {
+        "id": user.id,
+        "username": user.username or "",
+        "first_name": user.first_name or "",
+        "last_name": user.last_name or "",
+        "last_seen": time.time(),
+    }
+    save_users(users)
+
+
+def is_admin_session(uid: int) -> bool:
+    sessions = load_admin_sessions()
+    key = str(uid)
+    if key in sessions:
+        if time.time() - sessions[key].get("time", 0) < 3600:
+            return True
+    return False
+
+
+def set_admin_session(uid: int) -> None:
+    sessions = load_admin_sessions()
+    sessions[str(uid)] = {"time": time.time()}
+    save_admin_sessions(sessions)
+
+
+def clear_admin_session(uid: int) -> None:
+    sessions = load_admin_sessions()
+    sessions.pop(str(uid), None)
+    save_admin_sessions(sessions)
 
 
 # ---------------------------------------------------------------------------
@@ -346,19 +391,52 @@ async def show_link_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, d
 # ---------------------------------------------------------------------------
 # Command /start
 # ---------------------------------------------------------------------------
-@authorized
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cfg = load_config()
     user = update.effective_user
+    record_user(update)
+
+    blocked, reason = is_blocked(user.id)
+    if blocked:
+        await update.effective_message.reply_text(
+            f"<b>Access blocked.</b>\nReason: {esc(reason or 'No reason provided')}",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    allowed = is_allowed(user.id, user.username)
+    if not allowed:
+        await update.effective_message.reply_text(
+            "<b>Access restricted.</b> You are not on the allowed users list.\n"
+            "Contact the administrator to be added.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
     context.user_data.clear()
     context.user_data["started"] = time.time()
     await show_welcome(update, context)
 
 
 # ---------------------------------------------------------------------------
+# Command /admin
+# ---------------------------------------------------------------------------
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    record_user(update)
+
+    text = (
+        "<b>Admin Login</b>\n\n"
+        "Send your admin password to access the admin panel.\n"
+        "Username: <code>saeka</code>\n\n"
+        "Reply with the password only."
+    )
+    context.user_data["awaiting_admin_pass"] = True
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+# ---------------------------------------------------------------------------
 # Main button handler
 # ---------------------------------------------------------------------------
-@authorized
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -374,6 +452,55 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data == "nav:back":
         await handle_back(query, d, cfg)
+        return
+
+    # Admin panel callbacks
+    if data == "admin:panel":
+        if not is_admin_session(query.from_user.id):
+            await query.answer("Admin login required.", show_alert=True)
+            return
+        await show_admin_panel(query, context)
+        return
+    if data == "admin:users":
+        if not is_admin_session(query.from_user.id):
+            await query.answer("Admin login required.", show_alert=True)
+            return
+        await show_admin_users(query, context)
+        return
+    if data == "admin:block":
+        if not is_admin_session(query.from_user.id):
+            await query.answer("Admin login required.", show_alert=True)
+            return
+        await show_admin_block(query, context)
+        return
+    if data == "admin:add":
+        if not is_admin_session(query.from_user.id):
+            await query.answer("Admin login required.", show_alert=True)
+            return
+        await show_admin_add(query, context)
+        return
+    if data == "admin:unblock":
+        if not is_admin_session(query.from_user.id):
+            await query.answer("Admin login required.", show_alert=True)
+            return
+        await show_admin_unblock(query, context)
+        return
+    if data == "admin:logout":
+        clear_admin_session(query.from_user.id)
+        await safe_edit(query, "<b>Logged out.</b> Send /admin to login again.")
+        return
+
+    # Unblock specific user
+    if data.startswith("ublock:"):
+        if not is_admin_session(query.from_user.id):
+            await query.answer("Admin login required.", show_alert=True)
+            return
+        uid = data.split(":", 1)[1]
+        blocked = load_blocked()
+        blocked.pop(uid, None)
+        save_blocked(blocked)
+        await query.answer(f"User {uid} unblocked.")
+        await show_admin_unblock(query, context)
         return
 
     if data == "m:deploy":
@@ -430,115 +557,97 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("Option outdated. Use /start again.", show_alert=False)
 
 
-async def show_ads(query, d: dict, cfg: dict):
-    d["step"] = "ads"
-    rows = [[(f"{label}", f"a:{k}")] for k, label in ADS_CHOICES.items()]
-    await safe_edit(
-        query,
-        "<b>Step 2 — Ads Mode</b>\nChoose DNS filtering:",
-        reply_markup=with_nav(rows),
-    )
-
-
-async def show_mode(query, d: dict, cfg: dict):
-    d["step"] = "mode"
-    rows = [[(f"{label} — {sub}", f"m:{k}")] for k, (label, _, sub) in MODES.items()]
-    await safe_edit(
-        query,
-        "<b>Step 3 — Sizing Tier</b>\nPick your performance tier:",
-        reply_markup=with_nav(rows),
-    )
-
-
-async def show_region(query, d: dict, cfg: dict):
-    d["step"] = "region"
-    default = d.get("region") or cfg.get("default_region") or REGIONS[0]
-    rows = [[(r + (" *" if r == default else ""), f"r:{r}")] for r in REGIONS]
-    await safe_edit(
-        query,
-        "<b>Step 4 — Deploy Region</b>\nPick a GCP region (* = default):",
-        reply_markup=with_nav(rows),
-    )
-
-
-async def show_name(query, d: dict, cfg: dict):
-    d["step"] = "name"
-    await safe_edit(
-        query,
-        f"<b>Step 5 — Service Name</b>\nTap <b>Use {esc(d['name'])}</b> or send a custom name.\n\n"
-        f"Current: <code>{esc(d['name'])}</code>",
-        reply_markup=with_nav([[("Use " + d["name"], "n:use")]]),
-    )
-
-
-async def show_confirm(query, d: dict, cfg: dict):
-    d["step"] = "confirm"
-    markup = with_nav([[("Deploy Now", "c:go")]])
-    await safe_edit(
-        query,
-        "<b>Confirm Deployment</b>\n\n"
-        f"{draft_summary(d)}\n\n"
-        "<i>This creates real GCP resources (billing applies).</i>",
-        reply_markup=markup,
-    )
-
-
-async def handle_back(query, d: dict | None, cfg: dict):
-    if not d:
-        await safe_edit(query, "<b>No session.</b> Send /start.", reply_markup=None)
-        return
-    step = d.get("step")
-    if step == "engine":
-        await show_welcome_from_query(query)
-    elif step == "ads":
-        await show_engine(query, d, cfg)
-    elif step == "mode":
-        await show_ads(query, d, cfg)
-    elif step == "region":
-        await show_mode(query, d, cfg)
-    elif step == "name":
-        await show_region(query, d, cfg)
-    elif step == "confirm":
-        await show_name(query, d, cfg)
-    else:
-        await show_welcome_from_query(query)
-
-
-async def show_welcome_from_query(query):
+# ---------------------------------------------------------------------------
+# Admin screens
+# ---------------------------------------------------------------------------
+async def show_admin_panel(query, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "<b>SAEKA 4N1 FAST DEPLOYER</b>\n\n"
-        "Deploy your proxy stack to GCP Cloud Run.\n\n"
-        "Tap <b>Deploy</b> to begin."
+        "<b>Admin Panel</b>\n\n"
+        "Manage users and access.\n\n"
+        "Choose an option:"
     )
     await safe_edit(
         query, text,
         reply_markup=kb([
-            [("Deploy", "m:deploy")],
-            [("Exit", "m:exit")],
+            [("Live Users", "admin:users")],
+            [("Block User", "admin:block"), ("Unblock User", "admin:unblock")],
+            [("Add Allowed User", "admin:add")],
+            [("Logout", "admin:logout")],
         ]),
     )
 
 
-async def show_engine(query, d: dict, cfg: dict):
-    d["step"] = "engine"
-    rows = []
-    row = []
-    for key, (name, desc, _) in ENGINES.items():
-        row.append((f"{key}) {name}", f"e:{key}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
+async def show_admin_users(query, context: ContextTypes.DEFAULT_TYPE):
+    users = load_users()
+    blocked = load_blocked()
+    lines = []
+    if not users:
+        lines.append("No users recorded yet.")
+    else:
+        for uid, info in sorted(users.items(), key=lambda x: x[1].get("last_seen", 0), reverse=True):
+            is_blk = uid in blocked
+            status = " <i>[BLOCKED]</i>" if is_blk else ""
+            uname = info.get("username") or "-"
+            fname = info.get("first_name") or "-"
+            lines.append(
+                f"• <code>{uid}</code> | @{esc(uname)} | {esc(fname)}{status}"
+            )
+    text = "<b>Live Users</b>\n\n" + "\n".join(lines[:30])
+    if len(lines) > 30:
+        text += f"\n...and {len(lines) - 30} more"
     await safe_edit(
-        query,
-        "<b>Step 1 — Proxy Engine</b>\nChoose your engine:",
-        reply_markup=with_nav(rows),
+        query, text,
+        reply_markup=with_nav([], extra_back=False) + [[("Back", "admin:panel")]],
+    )
+
+
+async def show_admin_block(query, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "<b>Block User</b>\n\n"
+        "Send the Telegram user ID to block.\n"
+        "Optionally add a reason after a space.\n\n"
+        "Example: <code>123456789 Spamming</code>"
+    )
+    context.user_data["admin_action"] = "block"
+    await safe_edit(
+        query, text,
+        reply_markup=with_nav([], extra_back=False) + [[("Back", "admin:panel")]],
+    )
+
+
+async def show_admin_unblock(query, context: ContextTypes.DEFAULT_TYPE):
+    blocked = load_blocked()
+    if not blocked:
+        text = "<b>Unblock User</b>\n\nNo blocked users."
+        await safe_edit(
+            query, text,
+            reply_markup=with_nav([], extra_back=False) + [[("Back", "admin:panel")]],
+        )
+        return
+    rows = [[(f"Unblock {uid}", f"ublock:{uid}")] for uid in blocked.keys()]
+    text = "<b>Unblock User</b>\n\nSelect a user to unblock:"
+    await safe_edit(
+        query, text,
+        reply_markup=with_nav(rows, extra_back=False) + [[("Back", "admin:panel")]],
+    )
+
+
+async def show_admin_add(query, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "<b>Add Allowed User</b>\n\n"
+        "Send the Telegram user ID to allow.\n"
+        "Optionally add a username after a space.\n\n"
+        "Example: <code>123456789 john_doe</code>"
+    )
+    context.user_data["admin_action"] = "add"
+    await safe_edit(
+        query, text,
+        reply_markup=with_nav([], extra_back=False) + [[("Back", "admin:panel")]],
     )
 
 
 # ---------------------------------------------------------------------------
-# Text input
+# Text input (includes admin password and admin actions)
 # ---------------------------------------------------------------------------
 @authorized
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -546,6 +655,48 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     text = (msg.text or "").strip()
     d = context.user_data.get("draft")
+
+    # Admin password input
+    if context.user_data.get("awaiting_admin_pass"):
+        if text == ADMIN_PASS:
+            set_admin_session(msg.from_user.id)
+            context.user_data.pop("awaiting_admin_pass", None)
+            await msg.reply_text("<b>Admin access granted.</b>", parse_mode=ParseMode.HTML)
+            await show_admin_panel_from_msg(msg, context)
+        else:
+            context.user_data.pop("awaiting_admin_pass", None)
+            await msg.reply_text("<b>Wrong password.</b> Access denied.", parse_mode=ParseMode.HTML)
+        return
+
+    # Admin action inputs (block/add)
+    action = context.user_data.get("admin_action")
+    if action in ("block", "add") and is_admin_session(msg.from_user.id):
+        parts = text.split(None, 1)
+        uid = parts[0] if parts else ""
+        reason = parts[1] if len(parts) > 1 else ""
+        if not uid.isdigit():
+            await msg.reply_text("<b>Invalid user ID.</b> Must be numeric.", parse_mode=ParseMode.HTML)
+            return
+        if action == "block":
+            blocked = load_blocked()
+            blocked[uid] = {"reason": reason or "No reason provided", "blocked_at": time.time()}
+            save_blocked(blocked)
+            await msg.reply_text(
+                f"<b>User {uid} blocked.</b>\nReason: {esc(reason or 'No reason provided')}",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            allowed = load_allowed()
+            if uid not in allowed:
+                allowed.append(uid)
+                save_allowed(allowed)
+            await msg.reply_text(
+                f"<b>User {uid} added to allowed list.</b>",
+                parse_mode=ParseMode.HTML,
+            )
+        context.user_data.pop("admin_action", None)
+        await show_admin_panel_from_msg(msg, context)
+        return
 
     # Custom service name input
     if d and d.get("step") == "name":
@@ -590,15 +741,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def show_confirm_from_msg(msg, d: dict, cfg: dict):
-    d["step"] = "confirm"
-    markup = with_nav([[("Deploy Now", "c:go")]])
+async def show_admin_panel_from_msg(msg, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "<b>Admin Panel</b>\n\n"
+        "Manage users and access.\n\n"
+        "Choose an option:"
+    )
     await msg.reply_text(
-        "<b>Confirm Deployment</b>\n\n"
-        f"{draft_summary(d)}\n\n"
-        "<i>This creates real GCP resources (billing applies).</i>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=markup,
+        text, parse_mode=ParseMode.HTML,
+        reply_markup=kb([
+            [("Live Users", "admin:users")],
+            [("Block User", "admin:block"), ("Unblock User", "admin:unblock")],
+            [("Add Allowed User", "admin:add")],
+            [("Logout", "admin:logout")],
+        ]),
     )
 
 
@@ -825,6 +981,7 @@ def main() -> None:
     app.bot_data["current"] = None
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
