@@ -365,7 +365,7 @@ async def show_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update, context, text,
         reply_markup=kb([
             [("Deploy", "m:deploy")],
-            [("Exit", "m:exit")],
+            [("Exit", "nav:exit")],
         ]),
         gif_key="welcome",
     )
