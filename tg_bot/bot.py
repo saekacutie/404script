@@ -4,7 +4,7 @@ saeka-premium-bot — 4N1 FAST DEPLOYER Telegram Bot (Premium Edition)
 Public bot with admin panel (/admin, saeka/saeka404).
 Button-only interaction. Commands: /start, /admin.
 Welcome -> Deploy | Exit -> Fallback link -> Selection -> Deploy -> Links.
-HTML-styled fonts, GIF animations, Back/Exit on every screen.
+HTML-styled fonts, GIF animations, Back/Exit/Help on every screen.
 Admin: live users, block users, add allowed users.
 """
 
@@ -52,6 +52,7 @@ GIFS = {
     "error": "https://media.giphy.com/media/l378khQzB66sDlTjO/giphy.gif",
     "processing": "https://media.giphy.com/media/3o6ZtaO9BZHcOjmErm/giphy.gif",
     "link": "https://media.giphy.com/media/xT9IgzoKnwFNfISR8I/giphy.gif",
+    "help": "https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif",
 }
 
 BASE = Path(__file__).resolve().parent
@@ -302,18 +303,22 @@ async def send_msg(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
 
 
 async def safe_edit(query, text: str, reply_markup=None):
+    """Edit a message. Handles both text messages and animation/media messages."""
     try:
         await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        return
     except BadRequest as exc:
         msg = str(exc).lower()
-        if "object expected as reply markup" in msg or "can't edit message" in msg:
-            # Original message is an animation/media — edit caption instead
+        if "can't edit message" in msg or "message is not modified" not in msg:
+            # Original message might be an animation — try caption
             try:
                 await query.edit_message_caption(caption=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
-            except Exception:
-                pass
-        elif "not modified" not in msg:
-            log.debug("edit failed: %s", exc)
+                return
+            except Exception as exc2:
+                log.debug("caption edit also failed: %s", exc2)
+        if "message is not modified" in str(exc).lower():
+            return
+        log.debug("edit failed: %s", exc)
     except Exception as exc:
         log.debug("edit failed: %s", exc)
 
@@ -372,6 +377,7 @@ async def show_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update, context, text,
         reply_markup=kb([
             [("Deploy", "m:deploy")],
+            [("Help", "m:help")],
             [("Exit", "nav:exit")],
         ]),
         gif_key="welcome",
@@ -390,6 +396,27 @@ async def show_link_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, d
         update, context, text,
         reply_markup=with_nav([]),
         gif_key="link",
+    )
+
+
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "<b>Help — Getting a Qwiklabs Fallback Link</b>\n\n"
+        "<b>Step 1:</b> Go to <code>https://www.skills.google</code>\n"
+        "<b>Step 2:</b> Start a Qwiklabs quest/lab\n"
+        "<b>Step 3:</b> Click <b>Start Lab</b>\n"
+        "<b>Step 4:</b> Wait for the lab to provision\n"
+        "<b>Step 5:</b> Click the <b>Open Console</b> button\n"
+        "<b>Step 6:</b> Copy the full URL from your browser address bar\n"
+        "<b>Step 7:</b> Paste that URL here as your fallback link\n\n"
+        "The link contains your GCP project ID (e.g. qwiklabs-gcp-XXXX)\n"
+        "which I will extract automatically for deployment.\n\n"
+        "Tap <b>Back</b> to return, or <b>Exit</b> to close."
+    )
+    await send_msg(
+        update, context, text,
+        reply_markup=with_nav([]),
+        gif_key="help",
     )
 
 
@@ -511,6 +538,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "m:deploy":
         context.user_data["draft"] = new_draft(cfg)
         await show_link_prompt(update, context)
+        return
+    if data == "m:help":
+        await show_help(update, context)
         return
     if data == "m:exit":
         context.user_data.pop("draft", None)
