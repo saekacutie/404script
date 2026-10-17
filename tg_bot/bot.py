@@ -305,7 +305,14 @@ async def safe_edit(query, text: str, reply_markup=None):
     try:
         await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
     except BadRequest as exc:
-        if "not modified" not in str(exc).lower():
+        msg = str(exc).lower()
+        if "object expected as reply markup" in msg or "can't edit message" in msg:
+            # Original message is an animation/media — edit caption instead
+            try:
+                await query.edit_message_caption(caption=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+            except Exception:
+                pass
+        elif "not modified" not in msg:
             log.debug("edit failed: %s", exc)
     except Exception as exc:
         log.debug("edit failed: %s", exc)
