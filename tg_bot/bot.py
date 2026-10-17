@@ -649,8 +649,25 @@ async def show_admin_add(query, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 # Text input (includes admin password and admin actions)
 # ---------------------------------------------------------------------------
-@authorized
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user:
+        record_user(update)
+        blocked, reason = is_blocked(user.id)
+        if blocked:
+            await update.effective_message.reply_text(
+                f"<b>Access blocked.</b>\nReason: {esc(reason or 'No reason provided')}",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        if not is_allowed(user.id, user.username):
+            await update.effective_message.reply_text(
+                "<b>Access restricted.</b> You are not on the allowed users list.\n"
+                "Contact the administrator to be added.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
     cfg = load_config()
     msg = update.effective_message
     text = (msg.text or "").strip()
