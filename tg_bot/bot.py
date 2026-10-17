@@ -186,12 +186,10 @@ def is_blocked(uid: int) -> tuple[bool, str | None]:
 
 
 def is_allowed(uid: int, username: str | None) -> bool:
-    # Public by default: everyone can use unless blocked
     blocked, _ = is_blocked(uid)
     if blocked:
         return False
     allowed = load_allowed()
-    # If allowed list is empty, everyone is allowed (public)
     if not allowed:
         return True
     return str(uid) in allowed or (username and username in allowed)
@@ -597,7 +595,10 @@ async def show_admin_users(query, context: ContextTypes.DEFAULT_TYPE):
         text += f"\n...and {len(lines) - 30} more"
     await safe_edit(
         query, text,
-        reply_markup=with_nav([], extra_back=False) + [[("Back", "admin:panel")]],
+        reply_markup=kb([
+            [("Back", "admin:panel")],
+            [("Exit", "nav:exit")],
+        ]),
     )
 
 
@@ -611,7 +612,10 @@ async def show_admin_block(query, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["admin_action"] = "block"
     await safe_edit(
         query, text,
-        reply_markup=with_nav([], extra_back=False) + [[("Back", "admin:panel")]],
+        reply_markup=kb([
+            [("Back", "admin:panel")],
+            [("Exit", "nav:exit")],
+        ]),
     )
 
 
@@ -621,14 +625,19 @@ async def show_admin_unblock(query, context: ContextTypes.DEFAULT_TYPE):
         text = "<b>Unblock User</b>\n\nNo blocked users."
         await safe_edit(
             query, text,
-            reply_markup=with_nav([], extra_back=False) + [[("Back", "admin:panel")]],
+            reply_markup=kb([
+                [("Back", "admin:panel")],
+                [("Exit", "nav:exit")],
+            ]),
         )
         return
     rows = [[(f"Unblock {uid}", f"ublock:{uid}")] for uid in blocked.keys()]
     text = "<b>Unblock User</b>\n\nSelect a user to unblock:"
+    rows.append([("Back", "admin:panel")])
+    rows.append([("Exit", "nav:exit")])
     await safe_edit(
         query, text,
-        reply_markup=with_nav(rows, extra_back=False) + [[("Back", "admin:panel")]],
+        reply_markup=kb(rows),
     )
 
 
@@ -642,12 +651,138 @@ async def show_admin_add(query, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["admin_action"] = "add"
     await safe_edit(
         query, text,
-        reply_markup=with_nav([], extra_back=False) + [[("Back", "admin:panel")]],
+        reply_markup=kb([
+            [("Back", "admin:panel")],
+            [("Exit", "nav:exit")],
+        ]),
     )
 
 
 # ---------------------------------------------------------------------------
-# Text input (includes admin password and admin actions)
+# Deployment flow screens
+# ---------------------------------------------------------------------------
+async def show_engine(query, d: dict, cfg: dict):
+    d["step"] = "engine"
+    rows = []
+    row = []
+    for key, (name, desc, _) in ENGINES.items():
+        row.append((f"{key}) {name}", f"e:{key}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([("Back", "nav:back")])
+    rows.append([("Exit", "nav:exit")])
+    await safe_edit(
+        query,
+        "<b>Step 1 — Proxy Engine</b>\nChoose your engine:",
+        reply_markup=kb(rows),
+    )
+
+
+async def show_ads(query, d: dict, cfg: dict):
+    d["step"] = "ads"
+    rows = [[(f"{label}", f"a:{k}")] for k, label in ADS_CHOICES.items()]
+    rows.append([("Back", "nav:back")])
+    rows.append([("Exit", "nav:exit")])
+    await safe_edit(
+        query,
+        "<b>Step 2 — Ads Mode</b>\nChoose DNS filtering:",
+        reply_markup=kb(rows),
+    )
+
+
+async def show_mode(query, d: dict, cfg: dict):
+    d["step"] = "mode"
+    rows = [[(f"{label} — {sub}", f"m:{k}")] for k, (label, _, sub) in MODES.items()]
+    rows.append([("Back", "nav:back")])
+    rows.append([("Exit", "nav:exit")])
+    await safe_edit(
+        query,
+        "<b>Step 3 — Sizing Tier</b>\nPick your performance tier:",
+        reply_markup=kb(rows),
+    )
+
+
+async def show_region(query, d: dict, cfg: dict):
+    d["step"] = "region"
+    default = d.get("region") or cfg.get("default_region") or REGIONS[0]
+    rows = [[(r + (" *" if r == default else ""), f"r:{r}")] for r in REGIONS]
+    rows.append([("Back", "nav:back")])
+    rows.append([("Exit", "nav:exit")])
+    await safe_edit(
+        query,
+        "<b>Step 4 — Deploy Region</b>\nPick a GCP region (* = default):",
+        reply_markup=kb(rows),
+    )
+
+
+async def show_name(query, d: dict, cfg: dict):
+    d["step"] = "name"
+    rows = [[("Use " + d["name"], "n:use")]]
+    rows.append([("Back", "nav:back")])
+    rows.append([("Exit", "nav:exit")])
+    await safe_edit(
+        query,
+        f"<b>Step 5 — Service Name</b>\nTap <b>Use {esc(d['name'])}</b> or send a custom name.\n\n"
+        f"Current: <code>{esc(d['name'])}</code>",
+        reply_markup=kb(rows),
+    )
+
+
+async def show_confirm(query, d: dict, cfg: dict):
+    d["step"] = "confirm"
+    rows = [[("Deploy Now", "c:go")]]
+    rows.append([("Back", "nav:back")])
+    rows.append([("Exit", "nav:exit")])
+    await safe_edit(
+        query,
+        "<b>Confirm Deployment</b>\n\n"
+        f"{draft_summary(d)}\n\n"
+        "<i>This creates real GCP resources (billing applies).</i>",
+        reply_markup=kb(rows),
+    )
+
+
+async def handle_back(query, d: dict | None, cfg: dict):
+    if not d:
+        await safe_edit(query, "<b>No session.</b> Send /start.", reply_markup=None)
+        return
+    step = d.get("step")
+    if step == "engine":
+        await show_welcome_from_query(query)
+    elif step == "ads":
+        await show_engine(query, d, cfg)
+    elif step == "mode":
+        await show_ads(query, d, cfg)
+    elif step == "region":
+        await show_mode(query, d, cfg)
+    elif step == "name":
+        await show_region(query, d, cfg)
+    elif step == "confirm":
+        await show_name(query, d, cfg)
+    else:
+        await show_welcome_from_query(query)
+
+
+async def show_welcome_from_query(query):
+    text = (
+        "<b>SAEKA 4N1 FAST DEPLOYER</b>\n\n"
+        "Deploy your proxy stack to GCP Cloud Run.\n\n"
+        "Tap <b>Deploy</b> to begin."
+    )
+    await safe_edit(
+        query, text,
+        reply_markup=kb([
+            [("Deploy", "m:deploy")],
+            [("Exit", "nav:exit")],
+        ]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Text input
 # ---------------------------------------------------------------------------
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -775,6 +910,20 @@ async def show_admin_panel_from_msg(msg, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def show_confirm_from_msg(msg, d: dict, cfg: dict):
+    d["step"] = "confirm"
+    rows = [[("Deploy Now", "c:go")]]
+    rows.append([("Back", "nav:back")])
+    rows.append([("Exit", "nav:exit")])
+    await msg.reply_text(
+        "<b>Confirm Deployment</b>\n\n"
+        f"{draft_summary(d)}\n\n"
+        "<i>This creates real GCP resources (billing applies).</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb(rows),
+    )
+
+
 def engine_kb_with_nav():
     rows = []
     row = []
@@ -785,7 +934,38 @@ def engine_kb_with_nav():
             row = []
     if row:
         rows.append(row)
-    return with_nav(rows)
+    rows.append([("Back", "nav:back")])
+    rows.append([("Exit", "nav:exit")])
+    return kb(rows)
+
+
+# ---------------------------------------------------------------------------
+# Config helpers
+# ---------------------------------------------------------------------------
+def load_config() -> dict:
+    cfg = {
+        "repo_dir": "./404script",
+        "allowed_user_ids": [],
+        "default_region": "us-central1",
+        "default_service_name": "saeka",
+        "deploy_timeout_seconds": 3600,
+        "progress_interval_seconds": 3,
+    }
+    for path in (BASE / "config.yaml", DATA / "settings.json"):
+        if not path.exists():
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8")
+            loaded = json.loads(raw) if path.suffix == ".json" else yaml.safe_load(raw)
+            cfg.update({k: v for k, v in (loaded or {}).items() if v is not None})
+        except Exception as exc:
+            log.warning("could not read %s: %s", path, exc)
+    return cfg
+
+
+def repo_dir(cfg: dict) -> Path:
+    p = Path(str(cfg["repo_dir"])).expanduser()
+    return p if p.is_absolute() else (BASE / p).resolve()
 
 
 # ---------------------------------------------------------------------------
