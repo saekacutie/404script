@@ -114,11 +114,6 @@ static_resources:
   - name: xray_10002
     type: STATIC
     connect_timeout: 1s
-    typed_extension_protocol_options:
-      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-        explicit_http_config:
-          http2_protocol_options: {}
     load_assignment:
       cluster_name: xray_10002
       endpoints:
@@ -143,11 +138,6 @@ static_resources:
   - name: xray_10005
     type: STATIC
     connect_timeout: 1s
-    typed_extension_protocol_options:
-      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-        explicit_http_config:
-          http2_protocol_options: {}
     load_assignment:
       cluster_name: xray_10005
       endpoints:
@@ -172,11 +162,6 @@ static_resources:
   - name: xray_10008
     type: STATIC
     connect_timeout: 1s
-    typed_extension_protocol_options:
-      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-        explicit_http_config:
-          http2_protocol_options: {}
     load_assignment:
       cluster_name: xray_10008
       endpoints:
@@ -201,11 +186,6 @@ static_resources:
   - name: xray_10011
     type: STATIC
     connect_timeout: 1s
-    typed_extension_protocol_options:
-      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-        explicit_http_config:
-          http2_protocol_options: {}
     load_assignment:
       cluster_name: xray_10011
       endpoints:
@@ -284,15 +264,11 @@ static_resources:
       - lb_endpoints:
         - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 10015 } } }
 
-  # H2 (Xray "http" transport) clusters - real HTTP/2 duplex, same as gRPC
+  # H2-labeled XHTTP clusters - Xray's xhttp is NOT real HTTP/2, so these
+  # upstreams speak plain HTTP/1.1 to match the xhttp inbound on 10016-10019.
   - name: xray_10016
     type: STATIC
     connect_timeout: 1s
-    typed_extension_protocol_options:
-      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-        explicit_http_config:
-          http2_protocol_options: {}
     load_assignment:
       cluster_name: xray_10016
       endpoints:
@@ -301,11 +277,6 @@ static_resources:
   - name: xray_10017
     type: STATIC
     connect_timeout: 1s
-    typed_extension_protocol_options:
-      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-        explicit_http_config:
-          http2_protocol_options: {}
     load_assignment:
       cluster_name: xray_10017
       endpoints:
@@ -314,11 +285,6 @@ static_resources:
   - name: xray_10018
     type: STATIC
     connect_timeout: 1s
-    typed_extension_protocol_options:
-      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-        explicit_http_config:
-          http2_protocol_options: {}
     load_assignment:
       cluster_name: xray_10018
       endpoints:
@@ -327,11 +293,6 @@ static_resources:
   - name: xray_10019
     type: STATIC
     connect_timeout: 1s
-    typed_extension_protocol_options:
-      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-        explicit_http_config:
-          http2_protocol_options: {}
     load_assignment:
       cluster_name: xray_10019
       endpoints:

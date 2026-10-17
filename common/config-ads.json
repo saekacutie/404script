@@ -636,6 +636,32 @@
         "wsSettings": {
           "path": "/saeka-ssh"
         }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls"]
+      }
+    },
+    {
+      "port": 10021,
+      "listen": "127.0.0.1",
+      "protocol": "dokodemo-door",
+      "tag": "ovpn-ws",
+      "settings": {
+        "address": "127.0.0.1",
+        "port": 22,
+        "network": "tcp",
+        "followRedirect": false
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/saeka-ovpn"
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls"]
       }
     }
   ],

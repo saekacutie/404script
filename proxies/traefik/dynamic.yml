@@ -118,7 +118,7 @@ http:
         servers: [{url: "http://127.0.0.1:10001"}]
     trojan-xh-svc:
       loadBalancer:
-        servers: [{url: "h2c://127.0.0.1:10002"}]
+        servers: [{url: "http://127.0.0.1:10002"}]
     trojan-ws-svc:
       loadBalancer:
         servers: [{url: "http://127.0.0.1:10000"}]
@@ -131,7 +131,7 @@ http:
         servers: [{url: "http://127.0.0.1:10004"}]
     vmess-xh-svc:
       loadBalancer:
-        servers: [{url: "h2c://127.0.0.1:10005"}]
+        servers: [{url: "http://127.0.0.1:10005"}]
     vmess-ws-svc:
       loadBalancer:
         servers: [{url: "http://127.0.0.1:10003"}]
@@ -144,7 +144,7 @@ http:
         servers: [{url: "http://127.0.0.1:10007"}]
     vless-xh-svc:
       loadBalancer:
-        servers: [{url: "h2c://127.0.0.1:10008"}]
+        servers: [{url: "http://127.0.0.1:10008"}]
     vless-ws-svc:
       loadBalancer:
         servers: [{url: "http://127.0.0.1:10006"}]
@@ -157,20 +157,21 @@ http:
         servers: [{url: "http://127.0.0.1:10010"}]
     ss-xh-svc:
       loadBalancer:
-        servers: [{url: "h2c://127.0.0.1:10011"}]
+        servers: [{url: "http://127.0.0.1:10011"}]
     ss-ws-svc:
       loadBalancer:
         servers: [{url: "http://127.0.0.1:10009"}]
 
+    # --- H2-labeled XHTTP services - Xray's xhttp is NOT real HTTP/2 ---
     trojan-h2-svc:
       loadBalancer:
-        servers: [{url: "h2c://127.0.0.1:10016"}]
+        servers: [{url: "http://127.0.0.1:10016"}]
     vmess-h2-svc:
       loadBalancer:
-        servers: [{url: "h2c://127.0.0.1:10017"}]
+        servers: [{url: "http://127.0.0.1:10017"}]
     vless-h2-svc:
       loadBalancer:
-        servers: [{url: "h2c://127.0.0.1:10018"}]
+        servers: [{url: "http://127.0.0.1:10018"}]
     ss-h2-svc:
       loadBalancer:
-        servers: [{url: "h2c://127.0.0.1:10019"}]
+        servers: [{url: "http://127.0.0.1:10019"}]

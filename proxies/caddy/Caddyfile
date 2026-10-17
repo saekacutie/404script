@@ -35,11 +35,7 @@
         reverse_proxy 127.0.0.1:10001
     }
     handle /saeka-tojirp-xh* {
-        reverse_proxy 127.0.0.1:10002 {
-            transport http {
-                versions h2c 2
-            }
-        }
+        reverse_proxy 127.0.0.1:10002
     }
     handle /saeka-tojirp* {
         reverse_proxy 127.0.0.1:10000
@@ -57,11 +53,7 @@
         reverse_proxy 127.0.0.1:10004
     }
     handle /vmess-saeka-xh* {
-        reverse_proxy 127.0.0.1:10005 {
-            transport http {
-                versions h2c 2
-            }
-        }
+        reverse_proxy 127.0.0.1:10005
     }
     handle /vmess-saeka* {
         reverse_proxy 127.0.0.1:10003
@@ -79,11 +71,7 @@
         reverse_proxy 127.0.0.1:10007
     }
     handle /vless-saeka-xh* {
-        reverse_proxy 127.0.0.1:10008 {
-            transport http {
-                versions h2c 2
-            }
-        }
+        reverse_proxy 127.0.0.1:10008
     }
     handle /vless-saeka* {
         reverse_proxy 127.0.0.1:10006
@@ -101,44 +89,24 @@
         reverse_proxy 127.0.0.1:10010
     }
     handle /ss-saeka-xh* {
-        reverse_proxy 127.0.0.1:10011 {
-            transport http {
-                versions h2c 2
-            }
-        }
+        reverse_proxy 127.0.0.1:10011
     }
     handle /ss-saeka* {
         reverse_proxy 127.0.0.1:10009
     }
 
-    # --- H2 (Xray "http" transport) ---
+    # --- H2-labeled XHTTP routes - Xray's xhttp is NOT real HTTP/2 ---
     handle /saeka-tojirp-h2* {
-        reverse_proxy 127.0.0.1:10016 {
-            transport http {
-                versions h2c 2
-            }
-        }
+        reverse_proxy 127.0.0.1:10016
     }
     handle /vmess-saeka-h2* {
-        reverse_proxy 127.0.0.1:10017 {
-            transport http {
-                versions h2c 2
-            }
-        }
+        reverse_proxy 127.0.0.1:10017
     }
     handle /vless-saeka-h2* {
-        reverse_proxy 127.0.0.1:10018 {
-            transport http {
-                versions h2c 2
-            }
-        }
+        reverse_proxy 127.0.0.1:10018
     }
     handle /ss-saeka-h2* {
-        reverse_proxy 127.0.0.1:10019 {
-            transport http {
-                versions h2c 2
-            }
-        }
+        reverse_proxy 127.0.0.1:10019
     }
 
     handle {

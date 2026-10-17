@@ -278,6 +278,7 @@ run_quiet() {
 
 CB_CONFIG=$(mktemp)
 cat > "$CB_CONFIG" <<YAML
+timeout: '1200s'
 steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '-f', '${DOCKERFILE}', '-t', 'gcr.io/${PROJECT_ID}/${IMAGE_TAG}', '.']
@@ -354,14 +355,14 @@ deploy_attempt() {
 
 echo ""
 if run_quiet "Deploying to Cloud Run in ${REGION} (full tier)" deploy.log \
-        deploy_attempt "$CPU" "$RAM" "$MAX_INSTANCES" --concurrency 1000 --cpu-boost --no-cpu-throttling --min-instances 1; then
-    DEPLOY_NOTE="full stability tuning (always-on CPU)"
+        deploy_attempt "$CPU" "$RAM" "$MAX_INSTANCES" --concurrency 100 --cpu-boost --no-cpu-throttling --min-instances 1; then
+    DEPLOY_NOTE="full stability tuning (always-on CPU, concurrency 100)"
 elif run_quiet "Deploying to Cloud Run in ${REGION} (reduced tier)" deploy.log \
-        deploy_attempt 1 2Gi 2 --concurrency 500 --no-cpu-throttling --min-instances 1; then
-    DEPLOY_NOTE="reduced tier - project quota couldn't fit ${MODE}"
+        deploy_attempt 1 2Gi 2 --concurrency 50 --no-cpu-throttling --min-instances 1; then
+    DEPLOY_NOTE="reduced tier - project quota couldn't fit ${MODE} (concurrency 50)"
 elif run_quiet "Deploying to Cloud Run in ${REGION} (minimal tier)" deploy.log \
-        deploy_attempt 1 2Gi 2 --concurrency 250 --min-instances 0; then
-    DEPLOY_NOTE="minimal tier, no always-on CPU - expect cold-start delay after idle"
+        deploy_attempt 1 2Gi 2 --concurrency 25 --min-instances 0; then
+    DEPLOY_NOTE="minimal tier, no always-on CPU - expect cold-start delay after idle (concurrency 25)"
 else
     echo -e "  ${RED}DEPLOYMENT FAILED on every tier.${RESET}"
     exit 1

@@ -75,39 +75,88 @@ emit_link() {
 
 emit_link "vless"  "/vless-saeka"   "saeka-vless-ws"
 emit_link "trojan" "/saeka-tojirp"  "saeka-trojan-ws"
+emit_link "vmess"  "/vmess-saeka"   "saeka-vmess-ws"
+emit_link "ss"     "/ss-saeka"      "saeka-ss-ws"
 
 echo "[+] Share links (fp+sni, ECH if found - see file header re: pinning support in URIs):"
 cat "$LINKS_FILE"
 
-# Authoritative JSON outbound - the only place pinning is guaranteed to work.
-JSON_FILE="./client-links/${HOST}-outbound.json"
-cat > "$JSON_FILE" << EOF
+# Authoritative JSON outbound - one file per protocol. Pinning + ECH
+# all apply on the client's TLS dial, not on the server.
+emit_json() {
+    local proto="$1" path="$2" tag="$3"
+    local jf="./client-links/${HOST}-${tag}-outbound.json"
+    local ech_line=""
+    [ -n "$ECH_B64" ] && ech_line="      \"echConfigList\": \"${ECH_B64}\","
+    local pin_line=""
+    [ -n "$CERT_SHA256_B64" ] && pin_line="      \"${CERT_SHA256_B64}\""
+    case "$proto" in
+        vless)
+            local settings='    "settings": {
+      "vnext": [{
+        "address": "${HOST}",
+        "port": ${PORT},
+        "users": [{"id": "${USERID}", "encryption": "none"}]
+      }]
+    }'
+            ;;
+        trojan)
+            local settings='    "settings": {
+      "vnext": [{
+        "address": "${HOST}",
+        "port": ${PORT},
+        "users": [{"password": "${USERID}"}]
+      }]
+    }'
+            ;;
+        vmess)
+            local settings='    "settings": {
+      "vnext": [{
+        "address": "${HOST}",
+        "port": ${PORT},
+        "users": [{"id": "${USERID}", "alterId": 0}]
+      }]
+    }'
+            ;;
+        ss)
+            local settings='    "settings": {
+      "servers": [{
+        "address": "${HOST}",
+        "port": ${PORT},
+        "method": "aes-256-gcm",
+        "password": "${USERID}"
+      }]
+    }'
+            ;;
+    esac
+    cat > "$jf" << EOF
 {
-  "_comment": "Client-side outbound. fp/ech/pinning all apply here, on the TLS dial to ${HOST}:${PORT} - none of these are server config.",
-  "protocol": "vless",
-  "settings": {
-    "vnext": [{
-      "address": "${HOST}",
-      "port": ${PORT},
-      "users": [{"id": "${USERID}", "encryption": "none"}]
-    }]
-  },
+  "_comment": "Client-side outbound for ${proto}. fp/ech/pinning apply here on the TLS dial to ${HOST}:${PORT} - none are server config.",
+  "protocol": "${proto}",
+  ${settings},
   "streamSettings": {
     "network": "ws",
     "security": "tls",
-    "wsSettings": {"path": "/vless-saeka", "host": "${HOST}"},
+    "wsSettings": {"path": "${path}", "host": "${HOST}"},
     "tlsSettings": {
       "serverName": "${HOST}",
       "fingerprint": "${FP}",
-      $( [ -n "$ECH_B64" ] && echo "\"echConfigList\": \"${ECH_B64}\"," )
-      "pinnedPeerCertificateChainSha256": [$( [ -n "$CERT_SHA256_B64" ] && echo "\"${CERT_SHA256_B64}\"" )]
+${ech_line}
+      "pinnedPeerCertificateChainSha256": [${pin_line}]
     }
   }
 }
 EOF
+    echo "[+] Authoritative ${proto} outbound (pinning + ECH guaranteed): ${jf}"
+}
+
+emit_json "vless"  "/vless-saeka"   "vless"
+emit_json "trojan" "/saeka-tojirp"  "trojan"
+emit_json "vmess"  "/vmess-saeka"   "vmess"
+emit_json "ss"     "/ss-saeka"      "ss"
+
 echo ""
-echo "[+] Authoritative client outbound (pinning + ECH guaranteed): ${JSON_FILE}"
-[ -z "$CERT_SHA256_B64" ] && echo "[!] pinnedPeerCertificateChainSha256 is empty - fill it in once you have a live cert to probe, or the client will just skip pinning."
+[ -z "$CERT_SHA256_B64" ] && echo "[!] pinnedPeerCertificateChainSha256 is empty in all files - fill it in once you have a live cert to probe, or the client will just skip pinning."
 
 # --- Raw-TCP masked transport: not in the share links above (no TLS, no
 # path - it's a direct listener, only reachable on GCE/GKE, never Cloud
