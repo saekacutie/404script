@@ -154,12 +154,20 @@ def get_owner() -> int | None:
         return None
 
 
+def set_owner(uid: int) -> None:
+    f = DATA / "owner.json"
+    f.write_text(json.dumps({"id": uid}))
+
+
 def is_authorized(uid: int, cfg: dict) -> bool:
     allowed = [int(x) for x in (cfg.get("allowed_user_ids") or [])]
     if allowed:
         return uid in allowed
     owner = get_owner()
-    return owner is not None and uid == owner
+    if owner is None:
+        set_owner(uid)
+        return True
+    return uid == owner
 
 
 def authorized(fn):
@@ -342,14 +350,6 @@ async def show_link_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, d
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = load_config()
     user = update.effective_user
-    allowed = cfg.get("allowed_user_ids") or []
-    if not allowed and get_owner() is None:
-        (DATA / "owner.json").write_text(json.dumps({"id": user.id}))
-    elif not is_authorized(user.id, cfg):
-        await update.effective_message.reply_text(
-            "<b>Access denied.</b>", parse_mode=ParseMode.HTML
-        )
-        return
     context.user_data.clear()
     context.user_data["started"] = time.time()
     await show_welcome(update, context)
@@ -365,6 +365,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = load_config()
     data = query.data or ""
     d = context.user_data.get("draft")
+
+    log.info("Button pressed: %s, step: %s", data, d.get("step") if d else None)
 
     if data == "nav:exit":
         context.user_data.pop("draft", None)
