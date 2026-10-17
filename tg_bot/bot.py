@@ -101,7 +101,7 @@ TIERS = [
 
 
 def require_env() -> None:
-    missing = [k for k, v in (("BOT_TOKEN", BOT_TOKEN), ("GCP_PROJECT_ID", PROJECT_ID)) if not v]
+    missing = [k for k, v in (("BOT_TOKEN", BOT_TOKEN),) if not v]
     if missing:
         print(f"FATAL: missing env var(s): {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
@@ -442,8 +442,10 @@ async def tier_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         "max_instances": max_instances, "tier": mode_name, "min_instances": 1,
     })
     ud = context.user_data
+    deploy_project = ud.get("project_hint") or PROJECT_ID or ""
     text = (
         "<b>Confirm deployment</b>\n\n"
+        f"• Project: <code>{esc(deploy_project)}</code>\n"
         f"• Engine: <code>{esc(ud['engine_label'])}</code> ({ud['engine']})\n"
         f"• Ads: <code>{esc(ud['ads_label'])}</code>\n"
         f"• Region: <code>{esc(ud['region'])}</code>\n"
@@ -473,9 +475,19 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
 
     ud = context.user_data
+    # Project comes from the fallback link (qwiklabs-gcp-...), else env GCP_PROJECT_ID.
+    deploy_project = ud.get("project_hint") or PROJECT_ID or ""
+    if not deploy_project:
+        await query.edit_message_text(
+            "❌ No GCP project found. Send a fallback link containing a project "
+            "(e.g. qwiklabs-gcp-...) or set GCP_PROJECT_ID.",
+            parse_mode=ParseMode.HTML,
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
     await query.edit_message_text("🚀 <b>Starting deployment...</b>\nThis may take several minutes.", parse_mode=ParseMode.HTML)
 
-    deployer = Deployer(PROJECT_ID, ud["region"], REPO_DIR)
+    deployer = Deployer(deploy_project, ud["region"], REPO_DIR)
     engine = ud["engine"]
     image_tag = ud["image_tag"]
     service_name = ud["service_name"]
