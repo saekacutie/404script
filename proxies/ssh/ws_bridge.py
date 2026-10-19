@@ -63,6 +63,7 @@ def switching_response(key):
 
 
 async def pipe(reader, writer):
+    """Pump bytes from reader to writer until EOF, then half-close writer."""
     try:
         while True:
             data = await reader.read(BUF)
@@ -70,12 +71,16 @@ async def pipe(reader, writer):
                 break
             writer.write(data)
             await writer.drain()
-    except Exception:
+    except (ConnectionResetError, BrokenPipeError, OSError):
         pass
     finally:
         try:
-            writer.close()
-        except Exception:
+            writer.write_eof()
+        except (AttributeError, ConnectionError, OSError):
+            pass
+        try:
+            await writer.wait_closed()
+        except (AttributeError, ConnectionError, OSError):
             pass
 
 
@@ -94,6 +99,11 @@ async def handle(creader, cwriter, target_host, target_port, label):
         if "upgrade" not in headers:
             cwriter.write(HTTP_OK)
             await cwriter.drain()
+            try:
+                cwriter.write_eof()
+                await cwriter.wait_closed()
+            except (AttributeError, ConnectionError, OSError):
+                pass
             return
 
         try:
@@ -104,6 +114,11 @@ async def handle(creader, cwriter, target_host, target_port, label):
             log(label, "upstream %s:%s unreachable: %r" % (target_host, target_port, exc))
             cwriter.write(HTTP_BAD_GATEWAY)
             await cwriter.drain()
+            try:
+                cwriter.write_eof()
+                await cwriter.wait_closed()
+            except (AttributeError, ConnectionError, OSError):
+                pass
             return
         tune(uwriter)
 
@@ -115,11 +130,10 @@ async def handle(creader, cwriter, target_host, target_port, label):
         # pumped concurrently, so it's fully transparent to whatever the
         # client tunnels over it (including UDPGW's UDP-in-TCP framing,
         # which just needs an ordinary reliable byte stream).
-        tasks = [
-            asyncio.create_task(pipe(creader, uwriter)),
-            asyncio.create_task(pipe(ureader, cwriter)),
-        ]
-        _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        down_task = asyncio.create_task(pipe(creader, uwriter))
+        up_task = asyncio.create_task(pipe(ureader, cwriter))
+        done, pending = await asyncio.wait(
+            [down_task, up_task], return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
@@ -130,7 +144,8 @@ async def handle(creader, cwriter, target_host, target_port, label):
             if w is not None:
                 try:
                     w.close()
-                except Exception:
+                    await w.wait_closed()
+                except (AttributeError, ConnectionError, OSError):
                     pass
 
 

@@ -37,6 +37,18 @@ from urllib.parse import urlparse
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+# Socket timeouts so a dead peer can't leave a pipe blocked forever.
+SOCK_TIMEOUT = 15
+
+
+def tune(sock):
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        pass
+    sock.settimeout(SOCK_TIMEOUT)
+
 
 def ws_handshake(sock, host, path):
     key = base64.b64encode(secrets.token_bytes(16)).decode()
@@ -96,10 +108,12 @@ def _recv_exact(sock, n, leftover):
     return data
 
 
-def ws_recv_loop(sock, on_payload, initial_buf=b""):
-    """Read WS frames (server->client, unmasked) until close/EOF."""
+def ws_recv_loop(sock, on_payload, initial_buf=b"", stop_event=None):
+    """Read WS frames (server->client, unmasked) until close/EOF or stop_event."""
     leftover = [initial_buf]
     while True:
+        if stop_event is not None and stop_event.is_set():
+            return
         hdr = _recv_exact(sock, 2, leftover)
         if hdr is None:
             return
@@ -136,8 +150,11 @@ def handle_client(client_sock, remote_url):
     if parsed.query:
         path += "?" + parsed.query
 
+    tune(client_sock)
+
     try:
         raw = socket.create_connection((host, port), timeout=15)
+        tune(raw)
         if use_tls:
             ctx = ssl.create_default_context()
             ws_sock = ctx.wrap_socket(raw, server_hostname=host)
@@ -149,29 +166,54 @@ def handle_client(client_sock, remote_url):
         client_sock.close()
         return
 
+    stop_event = threading.Event()
+    client_closed = threading.Event()
+
     def ws_to_client(payload):
+        if client_closed.is_set():
+            return
         try:
             client_sock.sendall(payload)
         except OSError:
-            pass
+            client_closed.set()
 
-    t = threading.Thread(target=ws_recv_loop, args=(ws_sock, ws_to_client, leftover), daemon=True)
+    t = threading.Thread(
+        target=ws_recv_loop,
+        args=(ws_sock, ws_to_client, leftover),
+        kwargs={"stop_event": stop_event},
+        daemon=True,
+    )
     t.start()
 
     try:
         while True:
-            chunk = client_sock.recv(65536)
+            if client_closed.is_set():
+                break
+            try:
+                chunk = client_sock.recv(65536)
+            except socket.timeout:
+                continue
             if not chunk:
                 break
             ws_send(ws_sock, chunk)
-    except OSError:
+    except (OSError, socket.timeout):
         pass
     finally:
+        client_closed.set()
+        stop_event.set()
         try:
             ws_send(ws_sock, b"", opcode=0x8)
         except OSError:
             pass
+        try:
+            ws_sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         ws_sock.close()
+        try:
+            client_sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         client_sock.close()
 
 
@@ -184,6 +226,7 @@ def main():
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    tune(srv)
     srv.bind((args.local_host, args.local_port))
     srv.listen(20)
     print(f"[+] Listening on {args.local_host}:{args.local_port} -> {args.remote}")

@@ -19,8 +19,14 @@ if [ -n "${SSH_USERS_HASHED:-}" ]; then
     SSH_USERS="$SSH_USERS_HASHED"
     PASSWORDS_HASHED=1
 elif [ -z "${SSH_USERS:-}" ]; then
-    echo "[x] SSH_USERS_HASHED is required; refusing to generate or log a plaintext password." >&2
-    exit 1
+    # No users supplied: create one random account and print it to the logs.
+    RANDOM_USER="saeka-$(</dev/urandom tr -dc 'A-Za-z0-9' | head -c6)"
+    RANDOM_PASS="$(</dev/urandom tr -dc 'A-Za-z0-9' | head -c16)"
+    SSH_USERS="${RANDOM_USER}:${RANDOM_PASS}"
+    echo "[+] No SSH_USERS supplied - generated one-off account:"
+    echo "    username: ${RANDOM_USER}"
+    echo "    password: ${RANDOM_PASS}"
+    echo "    (shown once - write it down now)"
 fi
 IFS=',' read -ra PAIRS <<< "$SSH_USERS"
 for pair in "${PAIRS[@]}"; do

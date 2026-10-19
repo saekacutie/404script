@@ -18,8 +18,13 @@ NGX=/etc/nginx
 # ---------------------------------------------------------------- users
 # No users supplied: create one random account and print it to the logs.
 if [ -z "$SSH_USERS" ]; then
-    err "SSH_USERS_HASHED is required; refusing to generate or log a plaintext password."
-    exit 1
+    RANDOM_USER="saeka-$(</dev/urandom tr -dc 'A-Za-z0-9' | head -c6)"
+    RANDOM_PASS="$(</dev/urandom tr -dc 'A-Za-z0-9' | head -c16)"
+    SSH_USERS="${RANDOM_USER}:${RANDOM_PASS}"
+    ok "No SSH_USERS supplied - generated one-off account:"
+    echo "    username: ${RANDOM_USER}"
+    echo "    password: ${RANDOM_PASS}"
+    echo "    (shown once - write it down now)"
 fi
 export SSH_USERS_HASHED
 

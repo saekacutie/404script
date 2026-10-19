@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import logging
 import os
+import socket
 import sys
 
 # ---------------------------------------------------------------- logging
@@ -54,6 +55,16 @@ def parse_hostport(value, what):
     return host, port
 
 
+def tune(writer):
+    sock = writer.get_extra_info("socket")
+    if sock is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:
+            pass
+
+
 async def read_http_head(reader):
     data = b""
     while b"\r\n\r\n" not in data:
@@ -81,7 +92,10 @@ async def pipe(src, dst, tag=""):
     finally:
         try:
             dst.write_eof()
-            await dst.drain()
+        except (AttributeError, ConnectionError, OSError):
+            pass
+        try:
+            await dst.wait_closed()
         except (AttributeError, ConnectionError, OSError):
             pass
     return total
@@ -94,11 +108,19 @@ async def handle_client(reader, writer, target_host, target_port):
         head = await read_http_head(reader)
     except Exception as exc:
         log.warning("bad handshake from %s: %s", peer, exc)
-        writer.close()
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except (AttributeError, ConnectionError, OSError):
+            pass
         return
     if not head or b"\r\n\r\n" not in head:
         log.debug("empty handshake from %s (client disconnected early)", peer)
-        writer.close()
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except (AttributeError, ConnectionError, OSError):
+            pass
         return
     try:
         up_reader, up_writer = await asyncio.open_connection(target_host, target_port)
@@ -106,8 +128,14 @@ async def handle_client(reader, writer, target_host, target_port):
         log.error("upstream %s:%s unreachable for %s: %s", target_host, target_port, peer, exc)
         writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
         await writer.drain()
-        writer.close()
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except (AttributeError, ConnectionError, OSError):
+            pass
         return
+    tune(writer)
+    tune(up_writer)
     writer.write(HANDSHAKE_RESPONSE)
     await writer.drain()
     log.info("connected %s -> %s:%s", peer, target_host, target_port)
@@ -117,7 +145,11 @@ async def handle_client(reader, writer, target_host, target_port):
     log.info("closed %s (down=%dB up=%dB)", peer, down, up)
     for relay_writer in (writer, up_writer):
         if relay_writer is not None:
-            relay_writer.close()
+            try:
+                relay_writer.close()
+                await relay_writer.wait_closed()
+            except (AttributeError, ConnectionError, OSError):
+                pass
 
 
 async def main():
