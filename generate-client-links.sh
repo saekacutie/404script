@@ -2,31 +2,18 @@
 # ==============================================================================
 # CLIENT LINK / CONFIG GENERATOR
 # ==============================================================================
-# ECH config list and certificate SHA-256 pinning are NOT server-side Xray
-# settings in this stack. The server inbounds here listen on plaintext
-# 127.0.0.1 - TLS is terminated upstream of Xray entirely (by Cloud Run's
-# managed cert, or by whatever fronts your GCE/GKE deploy). There is no
-# TLS handshake inside the container for ECH or pinning to attach to.
+# Usage: ./generate-client-links.sh <host> [port] [uuid_or_password] [fp]
 #
-# Both settings are properties of the CLIENT's TLS dial to whatever host:port
-# it connects to:
-#   - fp (uTLS fingerprint)  shapes the client's ClientHello to look like a
-#     real browser, independent of who terminates TLS on the other end.
-#   - ECH config list         comes from a DNS HTTPS/SVCB record published for
-#     the domain, and tells the client how to encrypt its SNI in that hello.
-#   - pinned cert SHA-256     is the client checking the actual leaf cert it
-#     gets back matches what you expect (defends against a MITM presenting a
-#     different, still-valid cert for the same name).
-# All three are genuine anti-DPI / anti-MITM protections, they just apply on
-# the client's outbound TLS dial, not on the server JSON you asked me to add
-# them to.
+# ECH and uTLS fingerprint (fp) are properties of the CLIENT's TLS dial, not of
+# the server inbounds (those listen on plaintext 127.0.0.1; TLS is terminated
+# upstream by Cloud Run or your load balancer). So this script emits:
+#   1. share links (vless/trojan/vmess/ss) in each protocol's real URI format
+#   2. a full Xray outbound JSON per protocol (built with python's json module,
+#      so it is always valid JSON)
 #
-# NOTE ALSO: certificate pinning has no defined slot in the informal
-# vless://, vmess://, trojan:// share-link formats, and ECH-in-URI is only
-# understood by a handful of very recent xray-based clients. This script
-# therefore emits BOTH a share-link (best-effort, works everywhere for
-# fp+sni) AND a full JSON outbound config (authoritative, supports pinning
-# and ECH reliably in any Xray/V2Ray-core-based client).
+# Certificate pinning is OFF by default. Cloud Run / Google-managed leaf certs
+# rotate regularly, and a pinned leaf makes the client fail with "no internet"
+# the day the cert changes. Opt in with PIN=1 if you really want it.
 # ==============================================================================
 set -e
 
@@ -40,146 +27,154 @@ case "$FP" in
     *) echo "[-] Unknown fp '$FP', falling back to chrome"; FP="chrome";;
 esac
 
-echo "[+] Probing ${HOST}:${PORT} for its live certificate (best-effort)..."
+command -v python3 >/dev/null 2>&1 || { echo "[-] python3 is required"; exit 1; }
+
 CERT_SHA256_B64=""
-if command -v openssl >/dev/null 2>&1; then
+if [ "${PIN:-0}" = "1" ] && command -v openssl >/dev/null 2>&1; then
+    echo "[+] PIN=1: probing ${HOST}:${PORT} for its live certificate..."
     CERT_SHA256_B64=$(echo | timeout 5 openssl s_client -connect "${HOST}:${PORT}" -servername "${HOST}" 2>/dev/null \
         | openssl x509 -outform DER 2>/dev/null | openssl dgst -sha256 -binary | base64) || true
-fi
-if [ -z "$CERT_SHA256_B64" ]; then
-    echo "[-] Could not fetch a live cert (host not up yet, or openssl missing). Pin left blank - re-run once the service is live."
+    [ -z "$CERT_SHA256_B64" ] && echo "[-] Could not fetch a live cert; pinning skipped."
 fi
 
-echo "[+] Looking up ECH config for ${HOST} via DNS HTTPS record (best-effort)..."
 ECH_B64=""
 if command -v dig >/dev/null 2>&1; then
     ECH_B64=$(dig +short HTTPS "${HOST}" 2>/dev/null | grep -o 'ech=[^ "]*' | head -1 | cut -d= -f2) || true
 fi
-if [ -z "$ECH_B64" ]; then
-    echo "[-] No ECH record found (most domains don't publish one, and Cloud Run's default domain won't). Pass your own with ECH_OVERRIDE=<base64> if you have it."
-fi
 ECH_B64="${ECH_OVERRIDE:-$ECH_B64}"
-
-urlenc() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"; }
 
 mkdir -p ./client-links
 LINKS_FILE="./client-links/${HOST}-links.txt"
-: > "$LINKS_FILE"
 
-emit_link() {
-    local proto="$1" path="$2" label="$3"
-    local q="encryption=none&security=tls&sni=${HOST}&fp=${FP}&type=ws&host=${HOST}&path=$(urlenc "$path")"
-    [ -n "$ECH_B64" ] && q="${q}&ech=$(urlenc "$ECH_B64")"
-    echo "${proto}://${USERID}@${HOST}:${PORT}?${q}#${label}" >> "$LINKS_FILE"
-}
+HOST="$HOST" PORT="$PORT" USERID="$USERID" FP="$FP" \
+CERT_SHA256_B64="$CERT_SHA256_B64" ECH_B64="$ECH_B64" \
+LINKS_FILE="$LINKS_FILE" OUT_DIR="./client-links" \
+python3 -I - <<'PY'
+import base64, json, os, urllib.parse
 
-emit_link "vless"  "/vless-saeka"   "saeka-vless-ws"
-emit_link "trojan" "/saeka-tojirp"  "saeka-trojan-ws"
-emit_link "vmess"  "/vmess-saeka"   "saeka-vmess-ws"
-emit_link "ss"     "/ss-saeka"      "saeka-ss-ws"
+host = os.environ["HOST"]
+port = int(os.environ["PORT"])
+uid = os.environ["USERID"]
+fp = os.environ["FP"]
+pin = os.environ.get("CERT_SHA256_B64", "")
+ech = os.environ.get("ECH_B64", "")
+out_dir = os.environ["OUT_DIR"]
 
-echo "[+] Share links (fp+sni, ECH if found - see file header re: pinning support in URIs):"
-cat "$LINKS_FILE"
+PROTOS = [
+    # proto,   ws path,        tag
+    ("vless",  "/vless-saeka",  "vless"),
+    ("trojan", "/saeka-tojirp", "trojan"),
+    ("vmess",  "/vmess-saeka",  "vmess"),
+    ("ss",     "/ss-saeka",     "ss"),
+]
 
-# Authoritative JSON outbound - one file per protocol. Pinning + ECH
-# all apply on the client's TLS dial, not on the server.
-emit_json() {
-    local proto="$1" path="$2" tag="$3"
-    local jf="./client-links/${HOST}-${tag}-outbound.json"
-    local ech_line=""
-    [ -n "$ECH_B64" ] && ech_line="      \"echConfigList\": \"${ECH_B64}\","
-    local pin_line=""
-    [ -n "$CERT_SHA256_B64" ] && pin_line="      \"${CERT_SHA256_B64}\""
-    case "$proto" in
-        vless)
-            local settings='    "settings": {
-      "vnext": [{
-        "address": "${HOST}",
-        "port": ${PORT},
-        "users": [{"id": "${USERID}", "encryption": "none"}]
-      }]
-    }'
-            ;;
-        trojan)
-            local settings='    "settings": {
-      "vnext": [{
-        "address": "${HOST}",
-        "port": ${PORT},
-        "users": [{"password": "${USERID}"}]
-      }]
-    }'
-            ;;
-        vmess)
-            local settings='    "settings": {
-      "vnext": [{
-        "address": "${HOST}",
-        "port": ${PORT},
-        "users": [{"id": "${USERID}", "alterId": 0}]
-      }]
-    }'
-            ;;
-        ss)
-            local settings='    "settings": {
-      "servers": [{
-        "address": "${HOST}",
-        "port": ${PORT},
-        "method": "aes-256-gcm",
-        "password": "${USERID}"
-      }]
-    }'
-            ;;
-    esac
-    cat > "$jf" << EOF
-{
-  "_comment": "Client-side outbound for ${proto}. fp/ech/pinning apply here on the TLS dial to ${HOST}:${PORT} - none are server config.",
-  "protocol": "${proto}",
-  ${settings},
-  "streamSettings": {
-    "network": "ws",
-    "security": "tls",
-    "wsSettings": {"path": "${path}", "host": "${HOST}"},
-    "tlsSettings": {
-      "serverName": "${HOST}",
-      "fingerprint": "${FP}",
-${ech_line}
-      "pinnedPeerCertificateChainSha256": [${pin_line}]
+q = urllib.parse.quote
+
+
+def transport_query(path):
+    parts = [
+        ("security", "tls"), ("sni", host), ("fp", fp),
+        ("type", "ws"), ("host", host), ("path", path),
+    ]
+    if ech:
+        parts.append(("ech", ech))
+    return "&".join(f"{k}={q(v, safe='')}" for k, v in parts)
+
+
+def share_link(proto, path, label):
+    tq = transport_query(path)
+    if proto == "vless":
+        return f"vless://{q(uid, safe='')}@{host}:{port}?encryption=none&{tq}#{label}"
+    if proto == "trojan":
+        return f"trojan://{q(uid, safe='')}@{host}:{port}?{tq}#{label}"
+    if proto == "vmess":
+        # vmess:// is base64 of a JSON object (v2rayN format), not a normal URI.
+        obj = {
+            "v": "2", "ps": label, "add": host, "port": str(port), "id": uid,
+            "aid": "0", "scy": "auto", "net": "ws", "type": "none",
+            "host": host, "path": path, "tls": "tls", "sni": host, "fp": fp, "alpn": "",
+        }
+        return "vmess://" + base64.b64encode(json.dumps(obj).encode()).decode()
+    if proto == "ss":
+        # ss:// userinfo is base64(method:password), then host:port and query.
+        userinfo = base64.urlsafe_b64encode(f"aes-256-gcm:{uid}".encode()).decode().rstrip("=")
+        return f"ss://{userinfo}@{host}:{port}?{tq}#{label}"
+
+
+def outbound(proto, path, tag):
+    if proto == "vless":
+        settings = {"vnext": [{"address": host, "port": port,
+                               "users": [{"id": uid, "encryption": "none"}]}]}
+    elif proto == "vmess":
+        settings = {"vnext": [{"address": host, "port": port,
+                               "users": [{"id": uid, "alterId": 0, "security": "auto"}]}]}
+    elif proto == "trojan":
+        settings = {"servers": [{"address": host, "port": port, "password": uid}]}
+    else:  # ss
+        settings = {"servers": [{"address": host, "port": port,
+                                 "method": "aes-256-gcm", "password": uid}]}
+    tls = {"serverName": host, "fingerprint": fp}
+    if ech:
+        tls["echConfigList"] = ech
+    if pin:
+        tls["pinnedPeerCertificateChainSha256"] = [pin]
+    return {
+        "tag": f"saeka-{tag}",
+        "protocol": "shadowsocks" if proto == "ss" else proto,
+        "settings": settings,
+        "streamSettings": {
+            "network": "ws",
+            "security": "tls",
+            "tlsSettings": tls,
+            "wsSettings": {"path": path, "host": host},
+        },
     }
-  }
-}
-EOF
-    echo "[+] Authoritative ${proto} outbound (pinning + ECH guaranteed): ${jf}"
-}
 
-emit_json "vless"  "/vless-saeka"   "vless"
-emit_json "trojan" "/saeka-tojirp"  "trojan"
-emit_json "vmess"  "/vmess-saeka"   "vmess"
-emit_json "ss"     "/ss-saeka"      "ss"
 
-echo ""
-[ -z "$CERT_SHA256_B64" ] && echo "[!] pinnedPeerCertificateChainSha256 is empty in all files - fill it in once you have a live cert to probe, or the client will just skip pinning."
+links = []
+for proto, path, tag in PROTOS:
+    links.append(share_link(proto, path, f"saeka-{tag}-ws"))
+    full = {"outbounds": [outbound(proto, path, tag)]}
+    jf = os.path.join(out_dir, f"{host}-{tag}-outbound.json")
+    with open(jf, "w") as fh:
+        json.dump(full, fh, indent=2)
+        fh.write("\n")
+    print(f"[+] Xray outbound ({proto}): {jf}")
+
+with open(os.environ["LINKS_FILE"], "w") as fh:
+    fh.write("\n".join(links) + "\n")
+
+print("\n[+] Share links:")
+print("\n".join(links))
+PY
 
 # --- Raw-TCP masked transport: not in the share links above (no TLS, no
-# path - it's a direct listener, only reachable on GCE/GKE, never Cloud
-# Run). Add it to the client manually with these fields.
-if [ -n "$TCP_RAW_HOST" ]; then
+# path - it's a direct listener, only reachable on GCE/GKE, never Cloud Run).
+if [ -n "${TCP_RAW_HOST:-}" ]; then
     TCP_RAW_JSON="./client-links/${HOST}-rawtcp-outbound.json"
     cat > "$TCP_RAW_JSON" << EOF
 {
-  "_comment": "Raw TCP masked transport - point at the GCE/GKE host directly, NOT ${HOST}. No TLS applies here.",
-  "protocol": "${TCP_RAW_PROTOCOL:-vless}",
-  "settings": {
-    "vnext": [{
-      "address": "${TCP_RAW_HOST}",
-      "port": ${TCP_RAW_PORT:-20002},
-      "users": [{"id": "${USERID}", "encryption": "none"}]
-    }]
-  },
-  "streamSettings": {
-    "network": "tcp",
-    "security": "none",
-    "tcpSettings": {"header": {"type": "${TCP_RAW_MASK:-http}"}}
-  }
+  "outbounds": [{
+    "protocol": "${TCP_RAW_PROTOCOL:-vless}",
+    "settings": {
+      "vnext": [{
+        "address": "${TCP_RAW_HOST}",
+        "port": ${TCP_RAW_PORT:-20002},
+        "users": [{"id": "${USERID}", "encryption": "none"}]
+      }]
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "none",
+      "tcpSettings": {"header": {"type": "${TCP_RAW_MASK:-http}"}}
+    }
+  }]
 }
 EOF
-    echo "[+] Raw-TCP client outbound (fill in address/port/protocol to match what you enabled in deploy.sh): ${TCP_RAW_JSON}"
+    echo "[+] Raw-TCP client outbound: ${TCP_RAW_JSON}"
 fi
+
+echo ""
+echo "[i] Using a non-UUID id like 'saeka' works with Xray itself, but some mobile"
+echo "    clients insist on a UUID for vless/vmess. If an app rejects the link,"
+echo "    switch to the trojan or ss link, or change the id in common/config-*.json."

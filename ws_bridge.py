@@ -100,7 +100,14 @@ def ws_send(sock, data, opcode=0x2):
 
 def _recv_exact(sock, n, leftover):
     while len(leftover[0]) < n:
-        chunk = sock.recv(65536)
+        try:
+            chunk = sock.recv(65536)
+        except socket.timeout:
+            # FIXED: the 15s connect timeout was also applied to reads, so any
+            # idle gap >15s raised here, killed the receive thread, and the
+            # tunnel silently stopped delivering data to the client. An idle
+            # read is not an error - just keep waiting.
+            continue
         if not chunk:
             return None
         leftover[0] += chunk
