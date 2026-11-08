@@ -17,6 +17,20 @@ YELLOW='\033[1;33m'; MAGENTA='\033[1;35m'; WHITE='\033[1;37m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Region can be preset: --region, XGCPX_REGION, CLOUDSDK_COMPUTE_REGION, or
+# `gcloud config set compute/region`. Otherwise regions.sh shows a live menu.
+REGION_HINT="${XGCPX_REGION:-${CLOUDSDK_COMPUTE_REGION:-}}"
+REGION_HINT_SOURCE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --region)   [ $# -ge 2 ] || { echo "--region requires a region name." >&2; exit 1; }
+                    REGION_HINT="$2"; REGION_HINT_SOURCE="--region"; shift 2;;
+        --region=*) REGION_HINT="${1#--region=}"; REGION_HINT_SOURCE="--region"; shift;;
+        -h|--help)  echo "Usage: $0 [--region REGION]"; exit 0;;
+        *)          echo "Unknown argument: $1 (use --help)" >&2; exit 1;;
+    esac
+done
+
 # ------------------------------------------------------------------------
 # TERMINAL LAYOUT HELPERS
 # Everything below is used to render the access screen as a centered
