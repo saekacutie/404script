@@ -13,7 +13,7 @@ RUN curl -fsSL -o /tmp/xray.zip \
 FROM debian:bookworm-slim
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl gnupg ca-certificates openssh-server \
+        curl gnupg ca-certificates openssh-server python3 \
     && curl -fsSL https://apt.envoyproxy.io/signing.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/envoy.gpg \
     && echo "deb [arch=amd64,arm64 signed-by=/etc/apt/trusted.gpg.d/envoy.gpg] https://apt.envoyproxy.io bookworm main" \
         > /etc/apt/sources.list.d/envoy.list \
@@ -28,6 +28,10 @@ COPY common/config-noads.json /etc/xray/config-noads.json
 COPY proxies/envoy/envoy.yaml /etc/envoy/envoy.yaml
 COPY proxies/envoy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# Saeka panel (served under /saeka-panel, separate process on 127.0.0.1:10030)
+COPY panel/server.py panel/index.html /opt/panel/
+ENV PANEL_ENGINE=envoy
 
 EXPOSE 8080
 ENTRYPOINT ["/entrypoint.sh"]

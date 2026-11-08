@@ -1,5 +1,11 @@
 http:
   routers:
+    # --- Saeka panel UI + API (separate process on 127.0.0.1:10030) ---
+    panel:
+      rule: "PathPrefix(`/saeka-panel`)"
+      service: panel-svc
+      priority: 95
+
     # --- SSH-over-WS (raw byte tunnel) ---
     ssh-ws:
       rule: "PathPrefix(`/saeka-ssh`)"
@@ -97,6 +103,10 @@ http:
       priority: 100
 
   services:
+    panel-svc:
+      loadBalancer:
+        servers: [{url: "http://127.0.0.1:10030"}]
+
     ssh-ws-svc:
       loadBalancer:
         servers: [{url: "http://127.0.0.1:10020"}]

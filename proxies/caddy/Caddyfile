@@ -13,6 +13,14 @@
         respond "OK" 200
     }
 
+    # Saeka panel UI + API (separate process, 127.0.0.1:10030). Caddy rewrites
+    # X-Forwarded-For, so hand the original value to the panel for visitor geo.
+    handle /saeka-panel* {
+        reverse_proxy 127.0.0.1:10030 {
+            header_up X-Panel-Xff {http.request.header.X-Forwarded-For}
+        }
+    }
+
     # SSH-over-WS - raw byte tunnel via Xray's
     # dokodemo-door inbound. Caddy auto-sorts handle blocks by
     # specificity, so position here doesn't matter.

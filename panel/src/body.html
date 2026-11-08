@@ -1,0 +1,150 @@
+<div id="boot" class="boot" role="status" aria-live="polite">
+  <div class="boot-in">
+    <b>Saeka</b>
+    <ol>
+      <li id="b1" class="on"><i></i>reading hostname</li>
+      <li id="b2"><i></i>asking the metadata server</li>
+      <li id="b3"><i></i>syncing visitor counters</li>
+      <li id="b4"><i></i>drawing the globe</li>
+    </ol>
+  </div>
+</div>
+
+<header class="top">
+  <a class="brand" href="#top" aria-label="Saeka server control">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>
+    <b>Saeka</b><small>server control</small>
+  </a>
+  <span class="sp"></span>
+  <div class="status" id="status" role="status"><span class="dot"></span><span id="stText">connecting</span></div>
+  <button class="btn" id="btnLock" type="button">Unlock</button>
+</header>
+
+<main id="top">
+  <section class="hero" aria-label="Server overview">
+    <div class="hero-l">
+      <p class="kicker">Now serving from</p>
+      <h1 class="region" id="regionCode" aria-live="polite" aria-label="Region">&mdash;</h1>
+      <p class="place"><span id="flag" class="flag-slot"></span><span><span id="city">Detecting region&hellip;</span> <span class="sub" id="country"></span></span></p>
+      <dl class="meta">
+        <div><dt>Provider</dt><dd id="mProv">&mdash;</dd></div>
+        <div><dt>Detected via</dt><dd id="mSrc">&mdash;</dd></div>
+        <div><dt>Host</dt><dd class="m" id="mHost">&mdash;</dd></div>
+        <div><dt>Coordinates</dt><dd class="m" id="mCoord">&mdash;</dd></div>
+        <div class="lk"><dt>Engine</dt><dd id="mEng">locked</dd></div>
+        <div class="lk"><dt>Uptime</dt><dd id="mUp">locked</dd></div>
+      </dl>
+      <div class="ctrs skel" id="ctrs">
+        <div class="ctr"><label>Online now <em id="peak"></em></label><div class="digits" id="cOnline"></div></div>
+        <div class="ctr"><label>Total visits</label><div class="digits" id="cTotal"></div></div>
+        <div class="ctr"><label>Today (UTC)</label><div class="digits" id="cToday"></div></div>
+        <div class="ctr"><label>Unique visitors</label><div class="digits" id="cUnique"></div></div>
+      </div>
+      <p class="since" id="since">&nbsp;</p>
+    </div>
+    <div class="hero-r">
+      <div class="globe-wrap" id="gw">
+        <canvas id="globe" role="img" aria-label="Interactive globe showing the server location"></canvas>
+        <div class="tip" id="tip"></div>
+        <div class="hud tr"><span class="lg s"></span>server &nbsp;<span class="lg v"></span>visitor<br>drag to rotate</div>
+        <div class="hud bl" id="hudC">&nbsp;</div>
+        <button class="btn" id="recenter" type="button">Find server</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec rv" id="access" aria-labelledby="hAccess">
+    <div class="sec-h">
+      <h2 id="hAccess">Boarding passes</h2>
+      <p>One pass per inbound. Every link is built live from the Xray config running in this container, with the host you are connected through.</p>
+      <span class="sp"></span>
+      <button class="btn pri" id="copyAll" type="button" hidden>Copy shown links</button>
+    </div>
+    <div id="accessBody" class="lock">
+      <div id="unlocked" hidden>
+        <div class="creds" id="creds"></div>
+        <div class="live" id="liveLine"></div>
+        <div class="bar">
+          <label class="fld"><span>Address</span><input class="inp" id="fAddr" spellcheck="false" autocomplete="off"></label>
+          <label class="fld"><span>Port</span><input class="inp" id="fPort" inputmode="numeric" autocomplete="off"></label>
+          <label class="fld"><span>Host / SNI</span><input class="inp" id="fSni" spellcheck="false" autocomplete="off"></label>
+          <label class="fld"><span>Fingerprint</span>
+            <select class="inp" id="fFp"><option>chrome</option><option>firefox</option><option>safari</option><option>ios</option><option>android</option><option>edge</option><option>random</option></select></label>
+          <button class="btn" id="fReset" type="button">Reset</button>
+        </div>
+        <div class="filters">
+          <div class="grp"><span>Protocol</span><div class="chips" id="fFam"></div></div>
+          <div class="grp"><span>Transport</span><div class="chips" id="fVar"></div></div>
+        </div>
+        <div class="tix" id="tix"></div>
+      </div>
+      <div id="lockedView">
+        <div class="tix" aria-hidden="true">
+          <div class="tk" data-f="vless"><div class="tk-main"><div class="tk-h"><b>vless</b><span>ws</span></div><p class="tk-p">/xxxxxxxxxxxx</p><p class="tk-u">vless://xxxxxxxx-xxxx-xxxx@host:443?encryption=none&amp;security=tls&amp;type=ws</p></div><div class="tk-stub"><span class="btn">Copy</span></div></div>
+          <div class="tk" data-f="vmess"><div class="tk-main"><div class="tk-h"><b>vmess</b><span>ws</span></div><p class="tk-p">/xxxxxxxxxxxx</p><p class="tk-u">vmess://eyJ2IjoiMiIsInBzIjoieHh4eHh4eHgiLCJhZGQiOiJob3N0Iiwi</p></div><div class="tk-stub"><span class="btn">Copy</span></div></div>
+          <div class="tk" data-f="trojan"><div class="tk-main"><div class="tk-h"><b>trojan</b><span>ws</span></div><p class="tk-p">/xxxxxxxxxxxx</p><p class="tk-u">trojan://xxxxxxxx@host:443?security=tls&amp;type=ws</p></div><div class="tk-stub"><span class="btn">Copy</span></div></div>
+        </div>
+        <div class="lock-cta">
+          <h3>Credentials are locked</h3>
+          <p>Enter the panel access key to reveal live credentials, share links, QR codes and visitor locations.</p>
+          <button class="btn pri" id="ctaUnlock" type="button">Unlock panel</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec rv" id="boardSec" aria-labelledby="hBoard" hidden>
+    <div class="sec-h">
+      <h2 id="hBoard">Departures</h2>
+      <p>Inbound health. &ldquo;Inbound&rdquo; is a TCP connect to the Xray listener inside the container; &ldquo;Edge&rdquo; is a real WebSocket handshake from your browser through the public URL and the proxy engine.</p>
+      <span class="sp"></span>
+      <button class="btn" id="testAll" type="button">Test edge</button>
+    </div>
+    <div class="tw"><table>
+      <thead><tr><th>Protocol</th><th>Transport</th><th>Route</th><th>Port</th><th>Inbound</th><th>Edge (WS)</th><th>This engine</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </section>
+
+  <section class="sec rv" id="activity" aria-labelledby="hAct">
+    <div class="sec-h"><h2 id="hAct">Traffic to this panel</h2><p>Real browsers only: a visit counts once per browser per 30 minutes.</p></div>
+    <div class="act">
+      <div>
+        <svg class="chart" id="chart" viewBox="0 0 560 170" role="img" aria-label="Visits per day, last 14 days"></svg>
+        <p class="note" id="storeNote"></p>
+      </div>
+      <div>
+        <ul class="feed" id="feed"><li class="empty">Waiting for data&hellip;</li></ul>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span><b>SAEKA PANEL</b> &middot; UDP by nano</span>
+  <span id="fNode">node &mdash;</span>
+  <span>Visitor IPs are never stored. Only country and city of recent visits are kept.</span>
+</footer>
+
+<div id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<dialog id="dlgLogin" aria-labelledby="dlgLoginT">
+  <form method="dialog" id="loginForm" autocomplete="off">
+    <div class="dl-h"><h3 id="dlgLoginT">Unlock panel</h3><button class="btn ico" type="button" data-close aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <div class="dl-b">
+      <p>Enter the access key that deploy.sh printed (<span style="font-family:var(--ff-m)">PANEL_KEY</span>).</p>
+      <label class="fld"><span>Access key</span><input class="inp" id="keyIn" type="password" autocomplete="current-password" spellcheck="false" required></label>
+      <div class="err" id="loginErr" role="alert"></div>
+      <button class="btn pri" id="loginGo" type="submit">Unlock</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlgQr" aria-labelledby="dlgQrT">
+  <div class="dl-h"><h3 id="dlgQrT">Scan to import</h3><button class="btn ico" type="button" data-close aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+  <div class="dl-b">
+    <div class="qr-box"><canvas id="qrCv" width="300" height="300"></canvas></div>
+    <div class="uri" id="qrUri"></div>
+    <div class="dl-a"><button class="btn pri" id="qrCopy" type="button">Copy link</button></div>
+  </div>
+</dialog>

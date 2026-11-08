@@ -63,12 +63,15 @@ restart() {
         xray)   start xray xray run -config /etc/xray/config.json ;;
         engine) start engine caddy run --config /etc/caddy/Caddyfile --adapter caddyfile ;;
         sshd)   start sshd /usr/sbin/sshd -D -e ;;
+        panel)  start panel python3 /opt/panel/server.py ;;
     esac
 }
 
 start xray xray run -config /etc/xray/config.json
 start engine caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 start sshd /usr/sbin/sshd -D -e
+# Panel is optional: if python or the panel dies it restarts alone, proxy traffic is unaffected.
+start panel python3 /opt/panel/server.py
 
 trap 'echo "[+] Shutting down..."; kill "${PIDS[@]}" 2>/dev/null; wait; exit 0' TERM INT
 

@@ -1,6 +1,10 @@
 entryPoints:
   web:
     address: ":8080"
+    # keep the real client address in X-Forwarded-For (Cloud Run sends it) so
+    # the panel can place visitors on the globe
+    forwardedHeaders:
+      insecure: true
 
 providers:
   file:

@@ -9,7 +9,7 @@ RUN curl -fsSL -o /tmp/xray.zip \
 
 FROM traefik:v3.1
 USER root
-RUN apk add --no-cache bash openssh openssh-server shadow ca-certificates
+RUN apk add --no-cache bash openssh openssh-server shadow ca-certificates python3
 
 COPY --from=xray-fetch /out/xray /usr/local/bin/xray
 RUN mkdir -p /etc/xray
@@ -21,6 +21,10 @@ RUN mkdir -p /etc/traefik
 COPY proxies/traefik/dynamic.yml /etc/traefik/dynamic.yml
 COPY proxies/traefik/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# Saeka panel (served under /saeka-panel, separate process on 127.0.0.1:10030)
+COPY panel/server.py panel/index.html /opt/panel/
+ENV PANEL_ENGINE=traefik
 
 EXPOSE 8080
 ENTRYPOINT ["/entrypoint.sh"]

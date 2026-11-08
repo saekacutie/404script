@@ -9,7 +9,7 @@ RUN curl -fsSL -o /tmp/xray.zip \
 
 FROM alpine:3.20
 USER root
-RUN apk add --no-cache bash openssh openssh-server shadow ca-certificates h2o
+RUN apk add --no-cache bash openssh openssh-server shadow ca-certificates h2o python3
 
 COPY --from=xray-fetch /out/xray /usr/local/bin/xray
 RUN mkdir -p /etc/xray
@@ -19,6 +19,10 @@ RUN mkdir -p /etc/h2o
 COPY proxies/h2o/h2o.conf /etc/h2o/h2o.conf
 COPY proxies/h2o/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# Saeka panel (served under /saeka-panel, separate process on 127.0.0.1:10030)
+COPY panel/server.py panel/index.html /opt/panel/
+ENV PANEL_ENGINE=h2o
 
 EXPOSE 8080
 ENTRYPOINT ["/entrypoint.sh"]

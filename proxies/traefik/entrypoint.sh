@@ -63,12 +63,15 @@ restart() {
         xray)   start xray xray run -config /etc/xray/config.json ;;
         engine) start engine traefik --configFile=/etc/traefik/traefik.yml ;;
         sshd)   start sshd /usr/sbin/sshd -D -e ;;
+        panel)  start panel python3 /opt/panel/server.py ;;
     esac
 }
 
 start xray xray run -config /etc/xray/config.json
 start engine traefik --configFile=/etc/traefik/traefik.yml
 start sshd /usr/sbin/sshd -D -e
+# Panel is optional: if python or the panel dies it restarts alone, proxy traffic is unaffected.
+start panel python3 /opt/panel/server.py
 
 trap 'echo "[+] Shutting down..."; kill "${PIDS[@]}" 2>/dev/null; wait; exit 0' TERM INT
 

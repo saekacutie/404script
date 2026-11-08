@@ -215,6 +215,8 @@ if [ "$PROXY_ENV" == "openresty" ]; then
 fi
 echo ""
 
+PANEL_KEY="${PANEL_KEY:-}"
+PANEL_BUCKET=""
 ADS_MODE="n/a"
 if [ "$STANDALONE" -eq 0 ]; then
     echo -e "  ${CYAN}==================================================${RESET}"
@@ -351,7 +353,45 @@ elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     echo ""
     ENV_VARS="^@^OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
 else
-    ENV_VARS="ADS_MODE=${ADS_MODE}"
+    # ------------------------------------------------------------------
+    # SAEKA PANEL (served at /saeka-panel by every Xray engine above).
+    #   PANEL_KEY    - access key that unlocks credentials / links in the UI.
+    #                  Pre-set it with `PANEL_KEY=... ./deploy.sh`, type one
+    #                  below, or let this script generate one.
+    #   PANEL_BUCKET - Cloud Storage bucket holding the shared visitor counter,
+    #                  so totals survive restarts and every Cloud Run instance
+    #                  adds to the same number. Optional: if it can't be
+    #                  created the panel still works with per-instance counters.
+    # ------------------------------------------------------------------
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${GREEN}                  WEB PANEL${RESET}"
+    echo -e "  ${CYAN}==================================================${RESET}"
+    PANEL_KEY="${PANEL_KEY:-}"
+    if [ -z "$PANEL_KEY" ]; then
+        read -r -p "$(echo -e "  ${CYAN}Panel access key (blank = auto-generate): ${RESET}")" PANEL_KEY_IN
+        PANEL_KEY=$(printf '%s' "$PANEL_KEY_IN" | tr -dc 'A-Za-z0-9_-')
+    fi
+    if [ -z "$PANEL_KEY" ]; then
+        PANEL_KEY=$( (openssl rand -hex 8 2>/dev/null || date +%s%N | sha256sum) | tr -dc 'a-f0-9' | cut -c1-16 || true)
+    fi
+    PANEL_BUCKET=$(printf '%s' "${PROJECT_ID}-${SERVICE_NAME}-panel" | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-' | cut -c1-63 | sed 's/-*$//')
+    if gcloud storage buckets describe "gs://${PANEL_BUCKET}" --project="$PROJECT_ID" >/dev/null 2>&1 \
+        || run_quiet "Creating visitor-counter bucket" panel-bucket.log \
+            gcloud storage buckets create "gs://${PANEL_BUCKET}" --project="$PROJECT_ID" \
+                --location="$REGION" --uniform-bucket-level-access --quiet; then
+        PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)' 2>/dev/null || true)
+        if [ -n "$PROJECT_NUMBER" ]; then
+            gcloud storage buckets add-iam-policy-binding "gs://${PANEL_BUCKET}" \
+                --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+                --role="roles/storage.objectAdmin" --quiet >/dev/null 2>&1 || true
+        fi
+        echo -e "  ${GREEN}Visitor counter store: gs://${PANEL_BUCKET}${RESET}"
+    else
+        PANEL_BUCKET=""
+        echo -e "  ${YELLOW}Could not create a counter bucket - the panel will count per instance only.${RESET}"
+    fi
+    echo ""
+    ENV_VARS="ADS_MODE=${ADS_MODE},PANEL_KEY=${PANEL_KEY},PANEL_BUCKET=${PANEL_BUCKET}"
 fi
 
 deploy_attempt() {
@@ -396,6 +436,34 @@ if [ "$STANDALONE" -eq 0 ]; then
 fi
 echo -e "  ${CYAN}CPU / RAM  ${GREEN}${CPU} vCPU / ${RAM}${RESET}"
 echo ""
+
+if [ "$STANDALONE" -eq 0 ]; then
+    PANEL_URL="https://${CLEAN_HOST}/saeka-panel"
+    PANEL_UP="no"
+    for _ in 1 2 3 4 5 6 7 8; do
+        if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "${PANEL_URL}/api/health" 2>/dev/null || true)" = "200" ]; then
+            PANEL_UP="yes"; break
+        fi
+        sleep 4
+    done
+    echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
+    echo -e "  ${CYAN}                      WEB PANEL${RESET}"
+    echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
+    echo -e "  ${CYAN}PANEL URL  ${GREEN}${PANEL_URL}${RESET}"
+    echo -e "  ${CYAN}ACCESS KEY ${GREEN}${PANEL_KEY}${RESET}   ${YELLOW}(save it - needed to unlock credentials)${RESET}"
+    if [ "$PANEL_UP" = "yes" ]; then
+        echo -e "  ${CYAN}STATUS     ${GREEN}panel is answering${RESET}"
+    else
+        echo -e "  ${CYAN}STATUS     ${YELLOW}no answer yet - give a cold start 30s, then open the URL.${RESET}"
+        echo -e "  ${YELLOW}            If it stays down: gcloud run services logs read ${SERVICE_NAME} --region ${REGION}${RESET}"
+    fi
+    if [ -n "$PANEL_BUCKET" ]; then
+        echo -e "  ${CYAN}COUNTERS   ${GREEN}shared in gs://${PANEL_BUCKET}${RESET}"
+    else
+        echo -e "  ${CYAN}COUNTERS   ${YELLOW}per instance (no bucket)${RESET}"
+    fi
+    echo ""
+fi
 echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
 if [ "$PROXY_ENV" == "ssh" ]; then
     echo -e "  ${CYAN}                  SSH GATEWAY${RESET}"
