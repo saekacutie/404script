@@ -175,6 +175,210 @@ if [ -z "$PROJECT_ID" ]; then
     exit 1
 fi
 echo -e "  ${CYAN}PROJECT: ${GREEN}${PROJECT_ID}${RESET}"
+
+warn() { echo -e "  ${YELLOW}$*${RESET}"; }
+
+run_quiet() {
+    local label="$1" logfile="$2"
+    shift 2
+    : > "$logfile"
+    "$@" >"$logfile" 2>&1 &
+    local pid=$!
+    local spin='|/-\'
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$(( (i + 1) % 4 ))
+        printf "\r  ${CYAN}%s...${RESET} %s" "$label" "${spin:$i:1}"
+        sleep 0.2
+    done
+    wait "$pid"
+    local status=$?
+    if [ "$status" -eq 0 ]; then
+        printf "\r  ${GREEN}%s... OK${RESET}          \n" "$label"
+        rm -f "$logfile"
+        return 0
+    else
+        printf "\r  ${RED}%s... FAILED${RESET}          \n" "$label"
+        echo -e "  ${RED}Last 30 log lines (full log kept at ${logfile}):${RESET}"
+        tail -n 30 "$logfile"
+        return "$status"
+    fi
+}
+
+ACTIVE_ACCOUNT=$(gcloud config get-value account 2>/dev/null | tr -d '[:space:]' || true)
+[ -z "$ACTIVE_ACCOUNT" ] || echo -e "  ${CYAN}ACCOUNT: ${GREEN}${ACTIVE_ACCOUNT}${RESET}"
+echo ""
+
+# ------------------------------------------------------------------------
+# PREFLIGHT 1/3 - SCAN what this account is allowed to do, so the script picks
+# a strategy that works instead of discovering each denial minutes into a
+# build. Best effort: if the scan itself can't run, can() answers "yes" and
+# errors are handled when they happen.
+# ------------------------------------------------------------------------
+SCAN_OK=0
+HAVE_PERMS=""
+SCAN_TOKEN=""
+SCAN_PERMS=(run.services.create cloudbuild.builds.create artifactregistry.repositories.create \
+            storage.buckets.create resourcemanager.projects.setIamPolicy iam.serviceAccounts.actAs \
+            serviceusage.services.use serviceusage.services.enable)
+
+_test_perms() {   # _test_perms '"perm1","perm2"' -> prints granted perms; exit 2 if the API call itself failed
+    local hdr resp
+    for hdr in "x-goog-user-project: ${PROJECT_ID}" "x-scan: 1"; do
+        resp=$(curl -s --max-time 15 -X POST \
+            -H "Authorization: Bearer ${SCAN_TOKEN}" -H "$hdr" -H "Content-Type: application/json" \
+            -d "{\"permissions\":[$1]}" \
+            "https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT_ID}:testIamPermissions" 2>/dev/null || true)
+        if printf '%s' "$resp" | python3 -I -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+if "error" in d:
+    sys.exit(2)
+print(" ".join(d.get("permissions", [])))
+' 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 2
+}
+
+scan_permissions() {
+    local list p out any=0
+    SCAN_TOKEN=$(gcloud auth print-access-token 2>/dev/null | tr -d '[:space:]' || true)
+    [ -n "$SCAN_TOKEN" ] || return 0
+    list=$(printf '"%s",' "${SCAN_PERMS[@]}"); list="${list%,}"
+    if HAVE_PERMS=$(_test_perms "$list"); then
+        SCAN_OK=1
+        return 0
+    fi
+    # One unknown permission name fails the whole request - ask one at a time.
+    HAVE_PERMS=""
+    for p in "${SCAN_PERMS[@]}"; do
+        if out=$(_test_perms "\"$p\""); then
+            any=1
+            HAVE_PERMS="$HAVE_PERMS $out"
+        fi
+    done
+    [ "$any" -eq 1 ] && SCAN_OK=1
+    return 0
+}
+
+can() { [ "$SCAN_OK" -ne 1 ] || [[ " $HAVE_PERMS " == *" $1 "* ]]; }
+
+# By default gcloud sends the current project as the API quota project
+# (X-Goog-User-Project), which needs serviceusage.services.use on it. Lab and
+# student accounts usually lack that, and every storage / Cloud Build call then
+# fails with "forbidden from accessing the bucket ... serviceusage.services.use".
+# LEGACY mode stops sending the header (API quota is charged to gcloud's own
+# client project instead). It changes quota attribution only - IAM on the actual
+# resources is still enforced. Returns 1 if it was already on.
+use_legacy_quota() {
+    [ "${CLOUDSDK_BILLING_QUOTA_PROJECT:-}" = "LEGACY" ] && return 1
+    export CLOUDSDK_BILLING_QUOTA_PROJECT=LEGACY
+    warn "$1"
+    warn "Switched gcloud to LEGACY quota mode (no X-Goog-User-Project header) for the rest of this run."
+    return 0
+}
+
+scan_permissions
+if [ "$SCAN_OK" -eq 1 ] && ! can serviceusage.services.use; then
+    use_legacy_quota "This account lacks serviceusage.services.use on ${PROJECT_ID}."
+fi
+
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)' 2>/dev/null | tr -d '[:space:]' || true)
+DEFAULT_SA=""
+[ -n "$PROJECT_NUMBER" ] && DEFAULT_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+
+# ------------------------------------------------------------------------
+# PREFLIGHT 2/3 - APIs, verified against the project's real list of enabled
+# services rather than trusting an "enable" call's exit code. Runs BEFORE the
+# region menu: the menu asks Cloud Run which regions the project can use, and
+# that fails until the API is on. A newly enabled API can take a short while to
+# show up, so after enabling we poll the list until everything is really there.
+# ------------------------------------------------------------------------
+REQUIRED_APIS="run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com storage.googleapis.com"
+
+enabled_apis() { gcloud services list --enabled --project="$PROJECT_ID" --format='value(config.name)' 2>/dev/null; }
+
+missing_apis() {   # prints the required APIs that are NOT enabled; returns 1 if the list can't be read
+    local have api
+    have=$(enabled_apis) || return 1
+    for api in $REQUIRED_APIS; do
+        printf '%s\n' "$have" | grep -qx "$api" || printf '%s ' "$api"
+    done
+    return 0
+}
+
+API_MISSING=""
+if MISSING=$(missing_apis); then
+    MISSING=${MISSING% }
+    if [ -z "$MISSING" ]; then
+        echo -e "  ${GREEN}APIs verified enabled: ${REQUIRED_APIS//.googleapis.com/}.${RESET}"
+    else
+        echo -e "  ${CYAN}Not enabled yet:${RESET} ${MISSING}"
+        # shellcheck disable=SC2086
+        run_quiet "Enabling APIs" preflight.log gcloud services enable $MISSING --project="$PROJECT_ID" || true
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            MISSING=$(missing_apis) || break
+            MISSING=${MISSING% }
+            [ -z "$MISSING" ] && break
+            sleep 5
+        done
+        if [ -z "$MISSING" ]; then
+            echo -e "  ${GREEN}APIs now verified enabled.${RESET}"
+        else
+            API_MISSING="$MISSING"
+            warn "Still NOT enabled: ${MISSING}"
+            warn "An owner can run: gcloud services enable ${MISSING} --project=${PROJECT_ID}"
+        fi
+    fi
+else
+    # This account can't read the service list, so nothing can be verified.
+    # shellcheck disable=SC2086
+    if run_quiet "Enabling required Google APIs" preflight.log gcloud services enable $REQUIRED_APIS --project="$PROJECT_ID"; then
+        warn "The enable call succeeded, but this account can't list services to double-check it."
+    else
+        warn "Can't verify or enable APIs from this account; assuming the lab already enabled them. Any real gap will show up as an error below."
+    fi
+fi
+rm -f preflight.log
+
+# ------------------------------------------------------------------------
+# PREFLIGHT 3/3 - report
+# ------------------------------------------------------------------------
+scan_report() {
+    if [ "$SCAN_OK" -ne 1 ]; then
+        warn "Permission scan unavailable - continuing; any denial will be handled as it happens."
+        return 0
+    fi
+    local blockers=0 p mark line=""
+    for p in run.services.create cloudbuild.builds.create artifactregistry.repositories.create \
+             storage.buckets.create resourcemanager.projects.setIamPolicy iam.serviceAccounts.actAs \
+             serviceusage.services.use; do
+        if can "$p"; then mark="${GREEN}ok${RESET}"; else mark="${RED}NO${RESET}"; fi
+        line="${line}  ${p%%.*}:${p#*.}=${mark}"
+    done
+    echo -e "  ${CYAN}SCAN${RESET}${line}"
+    can run.services.create || { echo -e "  ${RED}x This account can't create Cloud Run services - the deploy will fail.${RESET}"; blockers=1; }
+    can cloudbuild.builds.create || { echo -e "  ${RED}x This account can't start Cloud Build builds - the build will fail.${RESET}"; blockers=1; }
+    can iam.serviceAccounts.actAs || warn "! Can't act as the runtime service account - the deploy may fail with an 'actAs' error."
+    can artifactregistry.repositories.create || warn "! Can't create Artifact Registry repos - will reuse an existing one, else gcr.io."
+    can storage.buckets.create || warn "! Can't create buckets - visitor counters stay per-instance and the build falls back to GitHub source if uploading is blocked."
+    can resourcemanager.projects.setIamPolicy || warn "! Can't change project IAM - the script won't try to; it will tell you what an owner must run."
+    if [ -n "$API_MISSING" ]; then
+        echo -e "  ${RED}x Required APIs are not enabled (${API_MISSING}); things that depend on them will fail.${RESET}"
+        blockers=1
+    fi
+    if [ "$blockers" -eq 1 ] && [ -t 0 ]; then
+        read -r -p "$(echo -e "  ${CYAN}Continue anyway? [y/N]: ${RESET}")" GO_ON
+        [[ "$GO_ON" =~ ^[Yy] ]] || exit 1
+    fi
+}
+
+scan_report
 echo ""
 
 echo -e "  ${CYAN}==================================================${RESET}"
@@ -240,8 +444,6 @@ else
     exit 1
 fi
 
-warn() { echo -e "  ${YELLOW}$*${RESET}"; }
-
 read -r -p "$(echo -e "  ${CYAN}SERVICE NAME [saeka]: ${RESET}")" INPUT_NAME
 SERVICE_NAME=${INPUT_NAME:-saeka}
 # Cloud Run names: lowercase letters, digits and hyphens, must start with a
@@ -280,60 +482,19 @@ case "$MODE_CHOICE" in
     *) CPU="1"; RAM="2Gi"; MODE="BROWSING"; MAX_INSTANCES="4";;
 esac
 
-run_quiet() {
-    local label="$1" logfile="$2"
-    shift 2
-    : > "$logfile"
-    "$@" >"$logfile" 2>&1 &
-    local pid=$!
-    local spin='|/-\'
-    local i=0
-    while kill -0 "$pid" 2>/dev/null; do
-        i=$(( (i + 1) % 4 ))
-        printf "\r  ${CYAN}%s...${RESET} %s" "$label" "${spin:$i:1}"
-        sleep 0.2
-    done
-    wait "$pid"
-    local status=$?
-    if [ "$status" -eq 0 ]; then
-        printf "\r  ${GREEN}%s... OK${RESET}          \n" "$label"
-        rm -f "$logfile"
-        return 0
-    else
-        printf "\r  ${RED}%s... FAILED${RESET}          \n" "$label"
-        echo -e "  ${RED}Last 30 log lines (full log kept at ${logfile}):${RESET}"
-        tail -n 30 "$logfile"
-        return "$status"
-    fi
-}
-
 # ------------------------------------------------------------------------
-# PREFLIGHT
-#   1. Enable the APIs this script needs. A fresh project has none of them on,
-#      and gcloud can't prompt for it inside run_quiet (stdin is detached), so
-#      the build used to die with a bare "API not enabled" error.
-#   2. Keep images in Artifact Registry. Container Registry (gcr.io) is shut
-#      down; a project that never used it rejects the push with
-#      "createOnPush" permission errors.
-#   3. Know the runtime service account, so the panel bucket grant goes to the
-#      identity the service really runs as.
+# IMAGE REPOSITORY + BUILD
+#   Image repo, best option first: our own Artifact Registry repo, any Docker
+#   repo already in the region (lab/student accounts often can't create one
+#   but can push to what exists), a new repo, then legacy gcr.io.
+#   Build source, best option first: the normal upload; our own staging bucket
+#   (when Cloud Build's default "<project>_cloudbuild" bucket is off-limits,
+#   which is the usual lab/student failure); building straight from GitHub.
 # ------------------------------------------------------------------------
-PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)' 2>/dev/null | tr -d '[:space:]' || true)
-DEFAULT_SA=""
-[ -n "$PROJECT_NUMBER" ] && DEFAULT_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
-
-if ! run_quiet "Enabling required Google APIs" preflight.log \
-        gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
-            artifactregistry.googleapis.com storage.googleapis.com --project="$PROJECT_ID"; then
-    warn "Couldn't enable one or more APIs (they may already be on, or this account may not be allowed to). Continuing."
-fi
-rm -f preflight.log
-
 AR_REPO="saeka"
-IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${IMAGE_TAG}"
 
 ensure_ar_repo() {
-    local out attempt
+    local out="" attempt
     for attempt in 1 2 3; do
         gcloud artifacts repositories describe "$AR_REPO" --location="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1 && return 0
         if out=$(gcloud artifacts repositories create "$AR_REPO" --repository-format=docker \
@@ -341,26 +502,49 @@ ensure_ar_repo() {
             return 0
         fi
         printf '%s' "$out" | grep -qi 'already exists' && return 0
+        printf '%s' "$out" | grep -qiE 'permission|denied' && break     # retrying can't fix a denial
         sleep 5     # a just-enabled API can take a few seconds to be usable
     done
-    printf '%s\n' "$out" | tail -n 4 >&2
     return 1
 }
 
-echo -e "  ${CYAN}Preparing Artifact Registry (${AR_REPO} in ${REGION})...${RESET}"
-if ensure_ar_repo; then
-    echo -e "  ${GREEN}Image repository ready.${RESET}"
+pick_image_repo() {
+    local existing
+    gcloud artifacts repositories describe "$AR_REPO" --location="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1 && return 0
+    existing=$(gcloud artifacts repositories list --project="$PROJECT_ID" --location="$REGION" \
+                   --filter='format=DOCKER' --format='value(name)' 2>/dev/null | head -n1 || true)
+    if [ -n "$existing" ]; then
+        AR_REPO="${existing##*/}"
+        return 0
+    fi
+    can artifactregistry.repositories.create || return 1
+    ensure_ar_repo
+}
+
+echo -e "  ${CYAN}Preparing the image repository in ${REGION}...${RESET}"
+if pick_image_repo; then
+    IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${IMAGE_TAG}"
+    echo -e "  ${GREEN}Using Artifact Registry repo '${AR_REPO}'.${RESET}"
 else
     IMAGE_URI="gcr.io/${PROJECT_ID}/${IMAGE_TAG}"
-    warn "Couldn't create an Artifact Registry repo; falling back to ${IMAGE_URI}."
+    warn "No usable Artifact Registry repo (this account can't create one) - using ${IMAGE_URI}."
 fi
 echo ""
 
+owner_hint() {
+    warn "A project owner can fix Cloud Build permissions with:"
+    warn "  gcloud projects add-iam-policy-binding ${PROJECT_ID} --member=serviceAccount:${DEFAULT_SA} --role=roles/cloudbuild.builds.builder"
+}
+
 # Cloud Build now runs as the project's default compute service account, which
-# a new project/org may not have given build rights. Only touched if a build
-# actually fails with a permission error (see below), so the normal path stays fast.
+# a new project/org may not have given build rights. Only touched when a build
+# fails with a permission error, so the normal path stays fast.
 heal_build_permissions() {
-    [ -n "$PROJECT_NUMBER" ] || return 1
+    if [ -z "$PROJECT_NUMBER" ] || ! can resourcemanager.projects.setIamPolicy; then
+        warn "This account can't change project IAM, so Cloud Build permissions can't be fixed from here."
+        owner_hint
+        return 1
+    fi
     local granted=0 sa role
     for sa in "$DEFAULT_SA" "${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"; do
         for role in roles/cloudbuild.builds.builder roles/artifactregistry.writer \
@@ -372,9 +556,8 @@ heal_build_permissions() {
         done
     done
     if [ "$granted" -eq 0 ]; then
-        warn "This account isn't allowed to change project IAM, so Cloud Build permissions can't be fixed from here."
-        warn "A project owner can run:"
-        warn "  gcloud projects add-iam-policy-binding ${PROJECT_ID} --member=serviceAccount:${DEFAULT_SA} --role=roles/cloudbuild.builds.builder"
+        warn "Granting Cloud Build rights failed."
+        owner_hint
         return 1
     fi
     echo -e "  ${GREEN}Granted Cloud Build build/push rights (${granted} bindings).${RESET}"
@@ -382,6 +565,7 @@ heal_build_permissions() {
 }
 
 CB_CONFIG=$(mktemp)
+CB_CONFIG_GH=""
 cat > "$CB_CONFIG" <<YAML
 timeout: '1200s'
 steps:
@@ -393,23 +577,107 @@ options:
   logging: CLOUD_LOGGING_ONLY
 YAML
 
-build_image() { gcloud builds submit . --config "$CB_CONFIG" --project="$PROJECT_ID"; }
+STAGING_BUCKET=$(printf '%s' "${PROJECT_ID}-${SERVICE_NAME}-build" | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-' | cut -c1-63 | sed 's/-*$//')
+prepare_staging_bucket() {
+    gcloud storage buckets describe "gs://${STAGING_BUCKET}" --project="$PROJECT_ID" >/dev/null 2>&1 && return 0
+    can storage.buckets.create || return 1
+    gcloud storage buckets create "gs://${STAGING_BUCKET}" --project="$PROJECT_ID" --location="$REGION" \
+        --uniform-bucket-level-access --public-access-prevention --quiet >/dev/null 2>&1
+}
 
-if ! run_quiet "Building ${ENGINE} image" build.log build_image; then
-    if grep -qiE 'permission|denied|forbidden|not have access|service account|\<iam\>' build.log \
-            && heal_build_permissions; then
-        echo -e "  ${YELLOW}Retrying the build once (IAM changes take a few seconds to apply)...${RESET}"
-        sleep 20
-        if ! run_quiet "Building ${ENGINE} image (retry)" build.log build_image; then
-            rm -f "$CB_CONFIG"
-            exit 1
-        fi
-    else
-        rm -f "$CB_CONFIG"
-        exit 1
-    fi
+# Last resort: let Cloud Build fetch the code itself, so nothing is uploaded to
+# a bucket. Needs a public https remote; builds the committed code, not local edits.
+REPO_URL=""; REPO_COMMIT=""
+if git -C "$SCRIPT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    REPO_URL=$(git -C "$SCRIPT_DIR" config --get remote.origin.url 2>/dev/null | sed -E 's#^(https://)[^@/]+@#\1#' || true)
+    REPO_COMMIT=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)
 fi
-rm -f "$CB_CONFIG"
+github_source_ok() {
+    [[ "$REPO_URL" == https://* ]] && [ -n "$REPO_COMMIT" ] || return 1
+    CB_CONFIG_GH=$(mktemp)
+    cat > "$CB_CONFIG_GH" <<YAML
+timeout: '1200s'
+steps:
+  - name: 'gcr.io/cloud-builders/git'
+    args: ['clone', '${REPO_URL}', 'src']
+  - name: 'gcr.io/cloud-builders/git'
+    dir: 'src'
+    args: ['checkout', '${REPO_COMMIT}']
+  - name: 'gcr.io/cloud-builders/docker'
+    dir: 'src'
+    args: ['build', '-f', '${DOCKERFILE}', '-t', '${IMAGE_URI}', '.']
+images:
+  - '${IMAGE_URI}'
+options:
+  logging: CLOUD_LOGGING_ONLY
+YAML
+}
+
+BUILD_MODE="upload"
+BUILD_NOTE=""
+build_image() {
+    case "$BUILD_MODE" in
+        staging) gcloud builds submit . --config "$CB_CONFIG" --project="$PROJECT_ID" \
+                     --gcs-source-staging-dir="gs://${STAGING_BUCKET}/source";;
+        github)  gcloud builds submit --no-source --config "$CB_CONFIG_GH" --project="$PROJECT_ID";;
+        *)       gcloud builds submit . --config "$CB_CONFIG" --project="$PROJECT_ID";;
+    esac
+}
+
+BUCKET_ERR_RE='forbidden from accessing the bucket|serviceusage\.services\.use|_cloudbuild|storage\.objects\.|staging'
+PERM_ERR_RE='permission|denied|forbidden|not have access|service account|\<iam\>'
+TRIED_QUOTA=0; TRIED_STAGING=0; TRIED_GITHUB=0; TRIED_HEAL=0
+build_ok=0
+while :; do
+    if run_quiet "Building ${ENGINE} image${BUILD_NOTE}" build.log build_image; then
+        build_ok=1
+        break
+    fi
+    # Rung 1: refused because of the API quota project (see use_legacy_quota).
+    if [ "$TRIED_QUOTA" -eq 0 ] && grep -qiE 'serviceusage\.services\.use|USER_PROJECT_DENIED|forbidden from accessing the bucket' build.log; then
+        TRIED_QUOTA=1
+        if use_legacy_quota "Cloud Build was refused using ${PROJECT_ID} as the API quota project."; then
+            continue
+        fi
+    fi
+    # Rung 2: the default "<project>_cloudbuild" bucket is off-limits -> own staging bucket.
+    # Rung 3: nothing can be uploaded -> let Cloud Build clone from GitHub.
+    if [ "$BUILD_MODE" = "upload" ] && [ "$TRIED_STAGING" -eq 0 ] && grep -qiE "$BUCKET_ERR_RE" build.log; then
+        TRIED_STAGING=1
+        warn "Cloud Build's default source bucket isn't usable by this account - trying our own staging bucket."
+        if prepare_staging_bucket; then
+            BUILD_MODE="staging"; BUILD_NOTE=" (own staging bucket)"
+            continue
+        fi
+        warn "Couldn't create a staging bucket either."
+    fi
+    if [ "$BUILD_MODE" != "github" ] && [ "$TRIED_GITHUB" -eq 0 ] && grep -qiE "$BUCKET_ERR_RE" build.log && github_source_ok; then
+        TRIED_GITHUB=1
+        BUILD_MODE="github"; BUILD_NOTE=" (from GitHub source)"
+        warn "Source can't be uploaded from here - building straight from GitHub (${REPO_URL} @ ${REPO_COMMIT:0:7})."
+        warn "Only committed + pushed code is built; uncommitted local edits are not included."
+        continue
+    fi
+    if [ "$TRIED_HEAL" -eq 0 ] && grep -qiE "$PERM_ERR_RE" build.log; then
+        TRIED_HEAL=1
+        if heal_build_permissions; then
+            echo -e "  ${YELLOW}Retrying the build once (IAM changes take a few seconds to apply)...${RESET}"
+            sleep 20
+            continue
+        fi
+    fi
+    break
+done
+rm -f "$CB_CONFIG" "$CB_CONFIG_GH"
+if [ "$build_ok" -ne 1 ]; then
+    echo -e "  ${RED}BUILD FAILED.${RESET} ${YELLOW}The last error is shown above; full log: ./build.log${RESET}"
+    if grep -qiE "$BUCKET_ERR_RE|$PERM_ERR_RE" build.log; then
+        warn "Every route was tried (LEGACY quota mode, own staging bucket, GitHub source) and this account is still refused."
+        warn "That is a limit on the account itself, which no script can grant. Use a project where you have Editor/Owner,"
+        warn "or ask an owner for roles/cloudbuild.builds.editor and roles/storage.admin on ${PROJECT_ID}."
+    fi
+    exit 1
+fi
 
 SSH_USERS_CSV=""
 if [ "$PROXY_ENV" == "ssh" ]; then
@@ -506,10 +774,11 @@ else
 
     PANEL_BUCKET=$(printf '%s' "${PROJECT_ID}-${SERVICE_NAME}-panel" | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-' | cut -c1-63 | sed 's/-*$//')
     if gcloud storage buckets describe "gs://${PANEL_BUCKET}" --project="$PROJECT_ID" >/dev/null 2>&1 \
-        || run_quiet "Creating visitor-counter bucket" panel-bucket.log \
-            gcloud storage buckets create "gs://${PANEL_BUCKET}" --project="$PROJECT_ID" \
-                --location="$REGION" --uniform-bucket-level-access \
-                --public-access-prevention --quiet; then
+        || { can storage.buckets.create \
+             && run_quiet "Creating visitor-counter bucket" panel-bucket.log \
+                gcloud storage buckets create "gs://${PANEL_BUCKET}" --project="$PROJECT_ID" \
+                    --location="$REGION" --uniform-bucket-level-access \
+                    --public-access-prevention --quiet; }; then
         rm -f panel-bucket.log
         RUNTIME_SA=$(resolve_runtime_sa)
         if bucket_grant "$RUNTIME_SA"; then

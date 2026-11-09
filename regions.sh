@@ -69,7 +69,18 @@ _RG_TMP_POLICY="$(mktemp "${TMPDIR:-/tmp}/404-location-policy.XXXXXX")"
 echo -e "  ${CYAN}Checking which regions ${PROJECT_ID} can deploy Cloud Run to...${RESET}"
 
 REGIONS=()
-if gcloud run regions list --project="$PROJECT_ID" --format=json >"$_RG_TMP_RUN" 2>/dev/null; then
+# A just-enabled API can take a few seconds to answer, so try twice, and keep the
+# real error to show if it still fails.
+_RG_ERR="${_RG_TMP_RUN}.err"
+_regions_ok=0
+for _try in 1 2; do
+    if gcloud run regions list --project="$PROJECT_ID" --format=json >"$_RG_TMP_RUN" 2>"$_RG_ERR"; then
+        _regions_ok=1
+        break
+    fi
+    [ "$_try" -eq 1 ] && sleep 5
+done
+if [ "$_regions_ok" -eq 1 ]; then
     {
         gcloud org-policies describe gcp.resourceLocations --effective --project="$PROJECT_ID" --format=json 2>/dev/null \
             || gcloud resource-manager org-policies describe gcp.resourceLocations --effective --project="$PROJECT_ID" --format=json 2>/dev/null \
@@ -149,9 +160,10 @@ PY
     rm -f -- "${_RG_TMP_POLICY}.err"
     if [ -n "$REGION_ROWS" ]; then mapfile -t REGIONS <<<"$REGION_ROWS"; fi
 else
-    echo -e "  ${YELLOW}Could not query Cloud Run regions (permission or API issue); using the built-in list.${RESET}"
+    _why="$(grep -m1 -iE 'denied|forbidden|not been used|disabled|not enabled|error' "$_RG_ERR" 2>/dev/null | cut -c1-150 || true)"
+    echo -e "  ${YELLOW}Could not query Cloud Run regions${_why:+ ($_why)}; using the built-in list.${RESET}"
 fi
-rm -f -- "$_RG_TMP_RUN" "$_RG_TMP_POLICY"
+rm -f -- "$_RG_TMP_RUN" "$_RG_TMP_POLICY" "$_RG_ERR"
 
 if [ "${#REGIONS[@]}" -eq 0 ]; then
     REGIONS=(us-central1 us-east1 us-west1 asia-east1 asia-southeast1 europe-west1 europe-west4)

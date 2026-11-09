@@ -173,7 +173,10 @@ function fmtCoord(lat, lon) {
   if (lat == null || lon == null) return '\u2014';
   return Math.abs(lat).toFixed(2) + '\u00B0' + (lat >= 0 ? 'N' : 'S') + ' ' + Math.abs(lon).toFixed(2) + '\u00B0' + (lon >= 0 ? 'E' : 'W');
 }
+let LAST_ST = null, LAST_STORE_ERR = '';
 function renderServer(sv) {
+  LAST_STORE_ERR = (sv && sv.store_error) || '';
+  renderStoreNote();
   if (!sv) return;
   setRegionCode((sv.region && sv.region !== 'unknown' ? sv.region : 'unknown').toUpperCase());
   $('#city').textContent = sv.city || 'Unknown location';
@@ -195,6 +198,20 @@ function renderServer(sv) {
 }
 
 /* ------------------------------------------------------------------ stats */
+function renderStoreNote() {
+  const st = LAST_ST;
+  if (!st) return;
+  const bits = [];
+  if (st.synced === false) {
+    // store_error only arrives for the signed-in admin; it names what Cloud Storage refused.
+    const why = LAST_STORE_ERR ? ' <code>' + esc(LAST_STORE_ERR) + '</code>' : '';
+    bits.push('<span class="warn"><b>Counter store unreachable</b> &mdash; numbers are kept on this node only until it reconnects.' + why + '</span>');
+  }
+  else if (st.store === 'gcs') bits.push('Counter store: <b>shared Cloud Storage object</b> &mdash; totals survive restarts and every instance adds to the same number.');
+  else bits.push('Counter store: <b>this node only</b> &mdash; set PANEL_BUCKET at deploy time (deploy.sh does it) so totals survive restarts and scale-out.');
+  $('#storeNote').innerHTML = bits.join(' ');
+  $('#storeNote').classList.toggle('warn', st.synced === false);
+}
 function renderStats(st) {
   if (!st) return;
   $('#ctrs').classList.remove('skel');
@@ -203,12 +220,8 @@ function renderStats(st) {
   const d = st.since ? new Date(st.since * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : null;
   $('#since').innerHTML = d ? 'Counting since <b>' + esc(d) + '</b> &middot; ' + (st.nodes > 1 ? '<b>' + st.nodes + '</b> nodes in sync' : 'one node') : '&nbsp;';
   renderChart(st.series || []);
-  const bits = [];
-  if (st.synced === false) bits.push('<span class="warn"><b>Counter store unreachable</b> &mdash; numbers are kept on this node only until it reconnects.</span>');
-  else if (st.store === 'gcs') bits.push('Counter store: <b>shared Cloud Storage object</b> &mdash; totals survive restarts and every instance adds to the same number.');
-  else bits.push('Counter store: <b>this node only</b> &mdash; set PANEL_BUCKET at deploy time (deploy.sh does it) so totals survive restarts and scale-out.');
-  $('#storeNote').innerHTML = bits.join(' ');
-  $('#storeNote').classList.toggle('warn', st.synced === false);
+  LAST_ST = st;
+  renderStoreNote();
   Globe.setVisitors(st.visitors || []);
   renderFeed(st.feed);
 }
