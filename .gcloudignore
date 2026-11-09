@@ -1,0 +1,28 @@
+# What `gcloud builds submit .` uploads to Cloud Build. Every Dockerfile only
+# COPYs from proxies/, common/ and panel/server.py + panel/index.html, so the
+# rest is dead weight (and cert.pem / key.pem must never leave this machine).
+#!include:.gitignore
+
+.git
+.gitignore
+
+# private keys / local deploy state
+cert.pem
+key.pem
+*.pem
+.domains-*.list
+*.log
+
+# not used inside any image
+*.md
+tools/
+deploy.sh
+deploy_vm.py
+gh_verify.py
+generate-client-links.sh
+regions.sh
+ws_bridge.py
+panel/src/
+panel/vendor/
+panel/build.py
+panel/test_panel.py

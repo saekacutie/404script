@@ -8,3 +8,10 @@ venv/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# local deploy state - never commit private keys
+cert.pem
+key.pem
+*.pem
+.domains-*.list
+*.log

@@ -240,8 +240,18 @@ else
     exit 1
 fi
 
+warn() { echo -e "  ${YELLOW}$*${RESET}"; }
+
 read -r -p "$(echo -e "  ${CYAN}SERVICE NAME [saeka]: ${RESET}")" INPUT_NAME
 SERVICE_NAME=${INPUT_NAME:-saeka}
+# Cloud Run names: lowercase letters, digits and hyphens, must start with a
+# letter, max 49 chars. Anything else (e.g. "My_Service") fails the deploy.
+CLEAN_NAME=$(printf '%s' "$SERVICE_NAME" | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-' | sed 's/^[^a-z]*//' | cut -c1-49 | sed 's/-*$//')
+[ -n "$CLEAN_NAME" ] || CLEAN_NAME="saeka"
+if [ "$CLEAN_NAME" != "$SERVICE_NAME" ]; then
+    warn "Service name '${SERVICE_NAME}' isn't valid for Cloud Run; using '${CLEAN_NAME}'."
+fi
+SERVICE_NAME="$CLEAN_NAME"
 IMAGE_TAG="${SERVICE_NAME}-${PROXY_ENV}"
 
 echo ""
@@ -261,6 +271,11 @@ case "$MODE_CHOICE" in
         read -r -p "$(echo -e "  ${CYAN}RAM (2Gi/4Gi/8Gi): ${RESET}")" RAM
         read -r -p "$(echo -e "  ${CYAN}MAX INSTANCES (1/2/4): ${RESET}")" MAX_INSTANCES
         MODE="CUSTOM"
+        case "$CPU" in 1|2|4|6|8) ;; *) warn "CPU '${CPU}' isn't valid (use 1/2/4); using 1."; CPU="1";; esac
+        [[ "$RAM" =~ ^[0-9]+(Mi|Gi)$ ]] || { warn "RAM '${RAM}' isn't valid (use e.g. 2Gi); using 2Gi."; RAM="2Gi"; }
+        if ! [[ "$MAX_INSTANCES" =~ ^[0-9]+$ ]] || [ "$MAX_INSTANCES" -lt 1 ]; then
+            warn "MAX INSTANCES '${MAX_INSTANCES}' isn't valid; using 4."; MAX_INSTANCES="4"
+        fi
         ;;
     *) CPU="1"; RAM="2Gi"; MODE="BROWSING"; MAX_INSTANCES="4";;
 esac
@@ -292,20 +307,107 @@ run_quiet() {
     fi
 }
 
+# ------------------------------------------------------------------------
+# PREFLIGHT
+#   1. Enable the APIs this script needs. A fresh project has none of them on,
+#      and gcloud can't prompt for it inside run_quiet (stdin is detached), so
+#      the build used to die with a bare "API not enabled" error.
+#   2. Keep images in Artifact Registry. Container Registry (gcr.io) is shut
+#      down; a project that never used it rejects the push with
+#      "createOnPush" permission errors.
+#   3. Know the runtime service account, so the panel bucket grant goes to the
+#      identity the service really runs as.
+# ------------------------------------------------------------------------
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)' 2>/dev/null | tr -d '[:space:]' || true)
+DEFAULT_SA=""
+[ -n "$PROJECT_NUMBER" ] && DEFAULT_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+
+if ! run_quiet "Enabling required Google APIs" preflight.log \
+        gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+            artifactregistry.googleapis.com storage.googleapis.com --project="$PROJECT_ID"; then
+    warn "Couldn't enable one or more APIs (they may already be on, or this account may not be allowed to). Continuing."
+fi
+rm -f preflight.log
+
+AR_REPO="saeka"
+IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${IMAGE_TAG}"
+
+ensure_ar_repo() {
+    local out attempt
+    for attempt in 1 2 3; do
+        gcloud artifacts repositories describe "$AR_REPO" --location="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1 && return 0
+        if out=$(gcloud artifacts repositories create "$AR_REPO" --repository-format=docker \
+                    --location="$REGION" --description="404script images" --project="$PROJECT_ID" 2>&1); then
+            return 0
+        fi
+        printf '%s' "$out" | grep -qi 'already exists' && return 0
+        sleep 5     # a just-enabled API can take a few seconds to be usable
+    done
+    printf '%s\n' "$out" | tail -n 4 >&2
+    return 1
+}
+
+echo -e "  ${CYAN}Preparing Artifact Registry (${AR_REPO} in ${REGION})...${RESET}"
+if ensure_ar_repo; then
+    echo -e "  ${GREEN}Image repository ready.${RESET}"
+else
+    IMAGE_URI="gcr.io/${PROJECT_ID}/${IMAGE_TAG}"
+    warn "Couldn't create an Artifact Registry repo; falling back to ${IMAGE_URI}."
+fi
+echo ""
+
+# Cloud Build now runs as the project's default compute service account, which
+# a new project/org may not have given build rights. Only touched if a build
+# actually fails with a permission error (see below), so the normal path stays fast.
+heal_build_permissions() {
+    [ -n "$PROJECT_NUMBER" ] || return 1
+    local granted=0 sa role
+    for sa in "$DEFAULT_SA" "${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"; do
+        for role in roles/cloudbuild.builds.builder roles/artifactregistry.writer \
+                    roles/logging.logWriter roles/storage.objectViewer; do
+            if gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+                    --member="serviceAccount:${sa}" --role="$role" --condition=None --quiet >/dev/null 2>&1; then
+                granted=$((granted + 1))
+            fi
+        done
+    done
+    if [ "$granted" -eq 0 ]; then
+        warn "This account isn't allowed to change project IAM, so Cloud Build permissions can't be fixed from here."
+        warn "A project owner can run:"
+        warn "  gcloud projects add-iam-policy-binding ${PROJECT_ID} --member=serviceAccount:${DEFAULT_SA} --role=roles/cloudbuild.builds.builder"
+        return 1
+    fi
+    echo -e "  ${GREEN}Granted Cloud Build build/push rights (${granted} bindings).${RESET}"
+    return 0
+}
+
 CB_CONFIG=$(mktemp)
 cat > "$CB_CONFIG" <<YAML
 timeout: '1200s'
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-f', '${DOCKERFILE}', '-t', 'gcr.io/${PROJECT_ID}/${IMAGE_TAG}', '.']
+    args: ['build', '-f', '${DOCKERFILE}', '-t', '${IMAGE_URI}', '.']
 images:
-  - 'gcr.io/${PROJECT_ID}/${IMAGE_TAG}'
+  - '${IMAGE_URI}'
+options:
+  logging: CLOUD_LOGGING_ONLY
 YAML
 
-if ! run_quiet "Building ${ENGINE} image" build.log \
-        gcloud builds submit . --config "$CB_CONFIG" --project="$PROJECT_ID"; then
-    rm -f "$CB_CONFIG"
-    exit 1
+build_image() { gcloud builds submit . --config "$CB_CONFIG" --project="$PROJECT_ID"; }
+
+if ! run_quiet "Building ${ENGINE} image" build.log build_image; then
+    if grep -qiE 'permission|denied|forbidden|not have access|service account|\<iam\>' build.log \
+            && heal_build_permissions; then
+        echo -e "  ${YELLOW}Retrying the build once (IAM changes take a few seconds to apply)...${RESET}"
+        sleep 20
+        if ! run_quiet "Building ${ENGINE} image (retry)" build.log build_image; then
+            rm -f "$CB_CONFIG"
+            exit 1
+        fi
+    else
+        rm -f "$CB_CONFIG"
+        exit 1
+    fi
 fi
 rm -f "$CB_CONFIG"
 
@@ -374,51 +476,113 @@ else
     if [ -z "$PANEL_KEY" ]; then
         PANEL_KEY=$( (openssl rand -hex 8 2>/dev/null || date +%s%N | sha256sum) | tr -dc 'a-f0-9' | cut -c1-16 || true)
     fi
+    # The service account the Cloud Run service actually runs as: whatever an
+    # existing revision uses, else the project's default compute account.
+    resolve_runtime_sa() {
+        local sa
+        sa=$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --project="$PROJECT_ID" \
+                --format='value(spec.template.spec.serviceAccountName)' 2>/dev/null | tr -d '[:space:]' || true)
+        printf '%s' "${sa:-$DEFAULT_SA}"
+    }
+
+    # Give a service account read/write on the counter bucket. Retries (a new
+    # account or bucket can take a few seconds to be visible) and keeps the
+    # real error in BUCKET_IAM_ERR instead of throwing it away.
+    BUCKET_IAM_ERR=""
+    bucket_grant() {
+        local sa="$1" out="" attempt
+        [ -n "$sa" ] || { BUCKET_IAM_ERR="runtime service account unknown"; return 1; }
+        for attempt in 1 2 3; do
+            if out=$(gcloud storage buckets add-iam-policy-binding "gs://${PANEL_BUCKET}" \
+                        --member="serviceAccount:${sa}" --role="roles/storage.objectAdmin" --quiet 2>&1); then
+                BUCKET_IAM_ERR=""
+                return 0
+            fi
+            sleep 4
+        done
+        BUCKET_IAM_ERR=$(printf '%s' "$out" | grep -v '^$' | tail -n 2 | tr '\n' ' ')
+        return 1
+    }
+
     PANEL_BUCKET=$(printf '%s' "${PROJECT_ID}-${SERVICE_NAME}-panel" | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-' | cut -c1-63 | sed 's/-*$//')
     if gcloud storage buckets describe "gs://${PANEL_BUCKET}" --project="$PROJECT_ID" >/dev/null 2>&1 \
         || run_quiet "Creating visitor-counter bucket" panel-bucket.log \
             gcloud storage buckets create "gs://${PANEL_BUCKET}" --project="$PROJECT_ID" \
-                --location="$REGION" --uniform-bucket-level-access --quiet; then
-        PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)' 2>/dev/null || true)
-        if [ -n "$PROJECT_NUMBER" ]; then
-            gcloud storage buckets add-iam-policy-binding "gs://${PANEL_BUCKET}" \
-                --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
-                --role="roles/storage.objectAdmin" --quiet >/dev/null 2>&1 || true
+                --location="$REGION" --uniform-bucket-level-access \
+                --public-access-prevention --quiet; then
+        rm -f panel-bucket.log
+        RUNTIME_SA=$(resolve_runtime_sa)
+        if bucket_grant "$RUNTIME_SA"; then
+            echo -e "  ${GREEN}Bucket access granted to ${RUNTIME_SA}.${RESET}"
+        else
+            warn "Couldn't grant bucket access to ${RUNTIME_SA:-the runtime service account}: ${BUCKET_IAM_ERR}"
+            warn "Continuing - many projects already give that account access through the Editor role."
+            warn "The check after deploy will confirm whether the counter really syncs."
         fi
         echo -e "  ${GREEN}Visitor counter store: gs://${PANEL_BUCKET}${RESET}"
     else
         PANEL_BUCKET=""
-        echo -e "  ${YELLOW}Could not create a counter bucket - the panel will count per instance only.${RESET}"
+        warn "Could not create a counter bucket - the panel will count per instance only."
     fi
     echo ""
     ENV_VARS="ADS_MODE=${ADS_MODE},PANEL_KEY=${PANEL_KEY},PANEL_BUCKET=${PANEL_BUCKET}"
 fi
 
+# --allow-unauthenticated makes the service public by granting allUsers the
+# invoker role. An org policy (domain-restricted sharing) can refuse that; gcloud
+# then exits non-zero even though the revision deployed. PUBLIC_FLAG is flipped to
+# --no-invoker-iam-check in that case, which makes the service public without an
+# IAM binding.
+PUBLIC_FLAG="--allow-unauthenticated"
+
 deploy_attempt() {
     local cpu="$1" mem="$2" maxi="$3"
     shift 3
     gcloud run deploy "$SERVICE_NAME" \
-        --image "gcr.io/${PROJECT_ID}/${IMAGE_TAG}" \
+        --image "$IMAGE_URI" \
         --platform managed --region "$REGION" \
         --cpu "$cpu" --memory "$mem" --port 8080 \
         --max-instances "$maxi" \
-        --timeout 3600 --allow-unauthenticated --project="$PROJECT_ID" \
+        --timeout 3600 "$PUBLIC_FLAG" --project="$PROJECT_ID" \
         --set-env-vars "$ENV_VARS" \
         --quiet "$@"
 }
 
+deploy_tier() {
+    case "$1" in
+        1) deploy_attempt "$CPU" "$RAM" "$MAX_INSTANCES" --concurrency 100 --cpu-boost --no-cpu-throttling --min-instances 1;;
+        2) deploy_attempt 1 2Gi 2 --concurrency 50 --no-cpu-throttling --min-instances 1;;
+        *) deploy_attempt 1 2Gi 2 --concurrency 25 --min-instances 0;;
+    esac
+}
+
 echo ""
-if run_quiet "Deploying to Cloud Run in ${REGION} (full tier)" deploy.log \
-        deploy_attempt "$CPU" "$RAM" "$MAX_INSTANCES" --concurrency 100 --cpu-boost --no-cpu-throttling --min-instances 1; then
-    DEPLOY_NOTE="full stability tuning (always-on CPU, concurrency 100)"
-elif run_quiet "Deploying to Cloud Run in ${REGION} (reduced tier)" deploy.log \
-        deploy_attempt 1 2Gi 2 --concurrency 50 --no-cpu-throttling --min-instances 1; then
-    DEPLOY_NOTE="reduced tier - project quota couldn't fit ${MODE} (concurrency 50)"
-elif run_quiet "Deploying to Cloud Run in ${REGION} (minimal tier)" deploy.log \
-        deploy_attempt 1 2Gi 2 --concurrency 25 --min-instances 0; then
-    DEPLOY_NOTE="minimal tier, no always-on CPU - expect cold-start delay after idle (concurrency 25)"
-else
+DEPLOY_NOTE=""
+deployed=0
+for tier in 1 2 3; do
+    case "$tier" in
+        1) tier_label="full tier";    tier_note="full stability tuning (always-on CPU, concurrency 100)";;
+        2) tier_label="reduced tier"; tier_note="reduced tier - project quota couldn't fit ${MODE} (concurrency 50)";;
+        *) tier_label="minimal tier"; tier_note="minimal tier, no always-on CPU - expect cold-start delay after idle (concurrency 25)";;
+    esac
+    for pass in 1 2; do
+        if run_quiet "Deploying to Cloud Run in ${REGION} (${tier_label})" deploy.log deploy_tier "$tier"; then
+            deployed=1
+            DEPLOY_NOTE="$tier_note"
+            break 2
+        fi
+        if [ "$pass" -eq 1 ] && [ "$PUBLIC_FLAG" = "--allow-unauthenticated" ] \
+                && grep -qiE 'Setting IAM policy failed|allowedPolicyMemberDomains|allUsers' deploy.log; then
+            warn "An organization policy blocks public (allUsers) access - retrying with --no-invoker-iam-check."
+            PUBLIC_FLAG="--no-invoker-iam-check"
+            continue
+        fi
+        break
+    done
+done
+if [ "$deployed" -ne 1 ]; then
     echo -e "  ${RED}DEPLOYMENT FAILED on every tier.${RESET}"
+    echo -e "  ${YELLOW}The error from the last attempt is shown above; the full log is ./deploy.log.${RESET}"
     exit 1
 fi
 
@@ -446,6 +610,44 @@ if [ "$STANDALONE" -eq 0 ]; then
         fi
         sleep 4
     done
+    # Does the panel really read/write the bucket? /api/public reports
+    # store=gcs + synced=true only after a successful round trip to GCS.
+    counter_synced() {
+        local i
+        for i in 1 2 3 4 5 6; do
+            if curl -s --max-time 8 "${PANEL_URL}/api/public" 2>/dev/null | python3 -I -c '
+import json, sys
+try:
+    s = json.load(sys.stdin)["stats"]
+except Exception:
+    sys.exit(1)
+sys.exit(0 if s.get("store") == "gcs" and s.get("synced") is True else 1)'; then
+                return 0
+            fi
+            sleep 8
+        done
+        return 1
+    }
+
+    COUNTER_STATE="none"
+    FINAL_SA=""
+    if [ -n "$PANEL_BUCKET" ]; then
+        COUNTER_STATE="unverified"
+        if [ "$PANEL_UP" = "yes" ]; then
+            echo -e "  ${CYAN}Checking the visitor counter can reach gs://${PANEL_BUCKET}...${RESET}"
+            # The grant before deploy went to the account we predicted; now the
+            # service exists, make sure the account it really runs as has it too.
+            FINAL_SA=$(resolve_runtime_sa)
+            if counter_synced; then
+                COUNTER_STATE="shared"
+            else
+                warn "Counter isn't syncing yet - re-applying bucket access for ${FINAL_SA:-the runtime account} and checking again."
+                bucket_grant "$FINAL_SA" || warn "Grant failed: ${BUCKET_IAM_ERR}"
+                if counter_synced; then COUNTER_STATE="shared"; else COUNTER_STATE="broken"; fi
+            fi
+        fi
+    fi
+
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
     echo -e "  ${CYAN}                      WEB PANEL${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
@@ -457,11 +659,19 @@ if [ "$STANDALONE" -eq 0 ]; then
         echo -e "  ${CYAN}STATUS     ${YELLOW}no answer yet - give a cold start 30s, then open the URL.${RESET}"
         echo -e "  ${YELLOW}            If it stays down: gcloud run services logs read ${SERVICE_NAME} --region ${REGION}${RESET}"
     fi
-    if [ -n "$PANEL_BUCKET" ]; then
-        echo -e "  ${CYAN}COUNTERS   ${GREEN}shared in gs://${PANEL_BUCKET}${RESET}"
-    else
-        echo -e "  ${CYAN}COUNTERS   ${YELLOW}per instance (no bucket)${RESET}"
-    fi
+    case "$COUNTER_STATE" in
+        shared)
+            echo -e "  ${CYAN}COUNTERS   ${GREEN}shared in gs://${PANEL_BUCKET} (sync verified)${RESET}";;
+        broken)
+            echo -e "  ${CYAN}COUNTERS   ${YELLOW}bucket not writable yet - counting per instance only${RESET}"
+            echo -e "  ${YELLOW}            The runtime account needs access. A project owner can run:${RESET}"
+            echo -e "  ${YELLOW}            gcloud storage buckets add-iam-policy-binding gs://${PANEL_BUCKET} --member=serviceAccount:${FINAL_SA:-<runtime-service-account>} --role=roles/storage.objectAdmin${RESET}"
+            echo -e "  ${YELLOW}            The exact reason is in: gcloud run services logs read ${SERVICE_NAME} --region ${REGION}${RESET}";;
+        unverified)
+            echo -e "  ${CYAN}COUNTERS   ${YELLOW}gs://${PANEL_BUCKET} (not verified - the panel wasn't answering yet)${RESET}";;
+        *)
+            echo -e "  ${CYAN}COUNTERS   ${YELLOW}per instance (no bucket)${RESET}";;
+    esac
     echo ""
 fi
 echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
@@ -682,5 +892,5 @@ echo -e "  ${YELLOW}Use the xHTTP links (mode packet-up). Cloud Run ends any sin
 echo -e "  ${YELLOW}the client configs recycle connections before that so nothing is cut mid-transfer.${RESET}"
 echo ""
 
-rm -f build.log deploy.log lb.log
+rm -f build.log deploy.log lb.log panel-bucket.log preflight.log
 echo -e "  ${GREEN}Deployer session complete.${RESET}"

@@ -96,6 +96,26 @@ class T(unittest.TestCase):
         snap = s.snapshot()
         self.assertEqual(snap["total"], 1); self.assertEqual(snap["store"], "local"); self.assertFalse(snap["synced"])
 
+    def test_gcs_permission_denied_is_explained(self):
+        class Denied(BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def do_GET(self):
+                body = json.dumps({"error": {"code": 403, "message": "sa@p.iam lacks storage.objects.get"}}).encode()
+                self.send_response(403); self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Denied)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        s = self._store(srv.server_port)
+        s.pulse("f" * 16, "6.6.6.6", True)
+        self.assertFalse(s.flush())
+        self.assertIn("HTTP 403", s.err)
+        self.assertIn("lacks storage.objects.get", s.err)        # Google's own message is kept
+        self.assertIn("roles/storage.objectAdmin", s.err)         # and the fix is named
+        self.assertEqual(s.fail_n, 1)
+        self.assertGreater(s.retry_at, time.time())               # backs off instead of hammering
+        self.assertEqual(s.snapshot()["store"], "local")          # UI degrades honestly
+        srv.shutdown()
+
     def test_visit_dedupe_and_ip_cap(self):
         os.environ.pop("PANEL_BUCKET", None)
         s = server.Store()

@@ -421,9 +421,31 @@ def merge_state(remote, d_total, d_vids, d_days, d_feed, iid, node_entry):
     return st
 
 
+def explain_gcs_error(e):
+    """One readable line for a failed GCS call: HTTP status + Google's own message,
+    plus the usual fix for permission errors (the bare 'HTTP Error 403: Forbidden'
+    that urllib gives says nothing about which identity or bucket was refused)."""
+    if isinstance(e, urllib.error.HTTPError):
+        msg = ""
+        try:
+            msg = json.loads(e.read().decode("utf-8", "replace")).get("error", {}).get("message", "")
+        except Exception:
+            pass
+        hint = ""
+        if e.code in (401, 403):
+            hint = (" -> the service's runtime service account needs roles/storage.objectAdmin "
+                    "on the PANEL_BUCKET bucket")
+        elif e.code == 404:
+            hint = " -> the PANEL_BUCKET bucket does not exist"
+        return "HTTP %d%s%s" % (e.code, (": " + msg) if msg else "", hint)
+    return "%s: %s" % (type(e).__name__, e)
+
+
 class Store:
     def __init__(self):
         self.lock = threading.RLock()
+        self.fail_n = 0          # consecutive failed syncs (drives the retry backoff)
+        self.retry_at = 0.0      # don't try again before this time
         self.iid = secrets.token_hex(3)
         self.bucket = os.environ.get("PANEL_BUCKET", "").strip()
         self.obj = os.environ.get("PANEL_OBJECT", "panel/state.json")
@@ -529,10 +551,15 @@ class Store:
                 os.replace(tmp, self.file)
         except Exception as e:
             with self.lock:
-                self.ok, self.err = False, "%s: %s" % (type(e).__name__, e)
+                self.ok, self.err = False, explain_gcs_error(e)
+                self.fail_n += 1
+                # back off 2s, 4s, 8s ... capped at 60s so a permission problem
+                # doesn't hammer the metadata server and GCS every flusher tick
+                self.retry_at = time.time() + min(60, 2 ** self.fail_n)
             log("sync failed:", self.err)
             return False
         with self.lock:
+            self.fail_n, self.retry_at = 0, 0.0
             self.d_total -= dt
             sent = set(dv)
             self.d_vids = [v for v in self.d_vids if v not in sent]
@@ -835,7 +862,8 @@ class Handler(BaseHTTPRequestHandler):
         if full:
             s.update(service=os.environ.get("K_SERVICE"), revision=os.environ.get("K_REVISION"),
                      engine=ENGINE, ads_mode=os.environ.get("ADS_MODE", ""), node=STORE.iid,
-                     uptime_s=int(time.time() - STARTED))
+                     uptime_s=int(time.time() - STARTED),
+                     store_error=STORE.err)    # authed only: names what GCS refused
         return s
 
     def _public(self, authed=None):
@@ -872,6 +900,8 @@ def flusher():
     while True:
         time.sleep(2)
         try:
+            if time.time() < STORE.retry_at:
+                continue
             if STORE.dirty or time.time() - last > 20:
                 STORE.flush()
                 last = time.time()
