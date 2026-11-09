@@ -624,6 +624,21 @@ build_image() {
     esac
 }
 
+# gcloud's plain "builds submit" doesn't show Cloud Logging output, and we build
+# with CLOUD_LOGGING_ONLY (no bucket needed), so a build that STARTS and then
+# fails would otherwise look like an empty error. Ask Cloud Build why.
+build_failure_details() {
+    local id
+    id=$(grep -ohE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' build.log 2>/dev/null | head -n1 || true)
+    [ -n "$id" ] || return 0
+    echo -e "  ${CYAN}Cloud Build ${id:0:8} says:${RESET}"
+    gcloud builds describe "$id" --project="$PROJECT_ID" \
+        --format='value(status,statusDetail,failureInfo.detail)' 2>&1 | grep -v '^$' | head -n 3 | cut -c1-200 | sed 's/^/    /' || true
+    gcloud logging read "resource.type=\"build\" AND resource.labels.build_id=\"${id}\"" --project="$PROJECT_ID" \
+        --order=asc --limit=60 --format='value(textPayload)' 2>/dev/null | grep -v '^$' | tail -n 15 | cut -c1-200 | sed 's/^/    | /' || true
+    return 0
+}
+
 BUCKET_ERR_RE='forbidden from accessing the bucket|serviceusage\.services\.use|_cloudbuild|storage\.objects\.|staging'
 PERM_ERR_RE='permission|denied|forbidden|not have access|service account|\<iam\>'
 TRIED_QUOTA=0; TRIED_STAGING=0; TRIED_GITHUB=0; TRIED_HEAL=0
@@ -671,11 +686,13 @@ done
 rm -f "$CB_CONFIG" "$CB_CONFIG_GH"
 if [ "$build_ok" -ne 1 ]; then
     echo -e "  ${RED}BUILD FAILED.${RESET} ${YELLOW}The last error is shown above; full log: ./build.log${RESET}"
+    build_failure_details
     if grep -qiE "$BUCKET_ERR_RE|$PERM_ERR_RE" build.log; then
         warn "Every route was tried (LEGACY quota mode, own staging bucket, GitHub source) and this account is still refused."
         warn "That is a limit on the account itself, which no script can grant. Use a project where you have Editor/Owner,"
         warn "or ask an owner for roles/cloudbuild.builds.editor and roles/storage.admin on ${PROJECT_ID}."
     fi
+    warn "To see exactly what this account can and can't do, run:  bash doctor.sh   (then send doctor-report.txt)"
     exit 1
 fi
 

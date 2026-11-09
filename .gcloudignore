@@ -26,3 +26,4 @@ panel/src/
 panel/vendor/
 panel/build.py
 panel/test_panel.py
+doctor.sh
