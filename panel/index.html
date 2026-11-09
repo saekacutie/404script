@@ -71,25 +71,18 @@ button,input,select{font:inherit;color:inherit}
 @keyframes live{0%{box-shadow:0 0 0 0 #8fd16a88}70%,100%{box-shadow:0 0 0 7px #8fd16a00}}
 
 /* ---- buttons -------------------------------------------------------- */
-.btn{position:relative;overflow:hidden;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:38px;padding:8px 16px;
-  border:1px solid var(--line-2);background:linear-gradient(180deg,var(--ink-3),var(--ink-2));color:var(--chalk);border-radius:6px;cursor:pointer;
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:7px 14px;
+  border:1px solid var(--line-2);background:transparent;border-radius:2px;cursor:pointer;
   font:600 12px/1 var(--ff-b);letter-spacing:.1em;text-transform:uppercase;white-space:nowrap;
-  box-shadow:inset 0 1px 0 #ffffff10,0 1px 0 #0006,0 3px 10px -6px #000;
-  transition:background .18s var(--ease),border-color .18s var(--ease),color .18s var(--ease),transform .12s var(--ease),box-shadow .18s var(--ease)}
-.btn::after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 35%,#ffffff22 50%,transparent 65%);
-  transform:translateX(-120%);transition:transform .55s var(--ease);pointer-events:none}
-.btn:hover{border-color:var(--chalk-2);transform:translateY(-1px);box-shadow:inset 0 1px 0 #ffffff18,0 6px 16px -8px #000}
-.btn:hover::after{transform:translateX(120%)}
-.btn:active{transform:translateY(1px) scale(.985);box-shadow:inset 0 2px 4px #0008}
-.btn:focus-visible,.chip:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
-.btn.pri{background:linear-gradient(180deg,#ffc247,var(--amber) 55%,var(--amber-2));border-color:var(--amber-2);color:#1b1305;
-  box-shadow:inset 0 1px 0 #fff6,0 6px 18px -8px #ffb21aaa}
-.btn.pri:hover{border-color:#ffd37a;box-shadow:inset 0 1px 0 #fff8,0 10px 24px -8px #ffb21add}
-.btn[disabled]{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none;filter:grayscale(.4)}
-.btn[disabled]::after{display:none}
-.btn.ico{padding:8px 10px;min-width:38px}
+  transition:background .18s var(--ease),border-color .18s var(--ease),color .18s var(--ease),transform .12s var(--ease)}
+.btn:hover{border-color:var(--chalk-2);background:var(--ink-3)}
+.btn:active{transform:translateY(1px)}
+.btn.pri{background:var(--amber);border-color:var(--amber);color:var(--ink)}
+.btn.pri:hover{background:#ffc247;border-color:#ffc247}
+.btn[disabled]{opacity:.5;cursor:default}
+.btn.ico{padding:7px 9px;min-width:36px}
 .btn svg{width:15px;height:15px;flex:none}
-.btn.done{border-color:var(--ok);color:var(--ok);background:#8fd16a1a}
+.btn.done{border-color:var(--ok);color:var(--ok)}
 
 /* ---- layout --------------------------------------------------------- */
 main{padding:0 var(--pad) 60px;max-width:1500px;margin:0 auto}
@@ -178,11 +171,10 @@ select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 50
 
 /* ---- filters -------------------------------------------------------- */
 .chips{display:flex;gap:6px;flex-wrap:wrap}
-.chip{padding:7px 12px;border:1px solid var(--line-2);background:var(--ink-2);border-radius:999px;cursor:pointer;
+.chip{padding:7px 12px;border:1px solid var(--line-2);background:transparent;border-radius:2px;cursor:pointer;
   font:600 11.5px/1 var(--ff-b);letter-spacing:.1em;text-transform:uppercase;color:var(--chalk-2);transition:all .15s var(--ease)}
 .chip:hover{border-color:var(--chalk-2)}
-.chip[aria-pressed=true]{background:var(--amber);color:#1b1305;border-color:var(--amber-2);box-shadow:0 4px 14px -8px #ffb21add}
-.chip:active{transform:scale(.96)}
+.chip[aria-pressed=true]{background:var(--chalk);color:var(--ink);border-color:var(--chalk)}
 .filters{display:flex;gap:10px 28px;flex-wrap:wrap;align-items:center;margin:0 0 20px}
 .filters .grp{display:flex;gap:10px;align-items:center}
 .filters .grp>span{font:600 10.5px/1 var(--ff-b);letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
@@ -312,7 +304,7 @@ dialog::backdrop{background:#0c0b09d9}
 /* ---- find servers dialog --------------------------------------------- */
 dialog.wide{width:min(640px,94vw)}
 .srv-list{display:flex;flex-direction:column;gap:8px;max-height:52vh;overflow:auto}
-.srv{display:grid;grid-template-columns:34px 1fr auto;gap:12px;align-items:center;padding:10px 12px;border:1px solid var(--line-2);border-radius:6px;background:var(--ink-3)}
+.srv{display:grid;grid-template-columns:34px 1fr auto;gap:12px;align-items:center;padding:10px 12px;border:1px solid var(--line-2);border-radius:2px;background:var(--ink-3)}
 .srv.sel{border-color:var(--ok)}
 .srv.off{opacity:.65}
 .srv-f{font-size:24px;text-align:center}
