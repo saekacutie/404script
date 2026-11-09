@@ -673,8 +673,13 @@ if [ -n "$LB_INPUT" ]; then
     echo ""
 fi
 
-echo -e "  ${CYAN}Generate client links / outbound JSON with:${RESET}"
+echo -e "  ${CYAN}Generate client links / outbound JSON (WS + xHTTP) with:${RESET}"
 echo -e "  ${GREEN}./generate-client-links.sh ${FINAL_HOST}${RESET}"
+echo ""
+echo -e "  ${CYAN}Behind a CDN (Cloudflare etc.)?${RESET} Proxy the domain, set SSL to Full, then:"
+echo -e "  ${GREEN}CDN_ADDRESS=<edge ip or CDN domain> ./generate-client-links.sh ${FINAL_HOST}${RESET}"
+echo -e "  ${YELLOW}Use the xHTTP links (mode packet-up). Cloud Run ends any single request at 3600s;${RESET}"
+echo -e "  ${YELLOW}the client configs recycle connections before that so nothing is cut mid-transfer.${RESET}"
 echo ""
 
 rm -f build.log deploy.log lb.log

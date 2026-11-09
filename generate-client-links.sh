@@ -11,6 +11,13 @@
 #   2. a full Xray outbound JSON per protocol (built with python's json module,
 #      so it is always valid JSON)
 #
+# CDN / fronting (Cloudflare, Cloud CDN, any proxying CDN):
+#   CDN_ADDRESS=<edge ip or CDN-fronted domain> ./generate-client-links.sh <host>
+# dials the CDN address while TLS SNI and the HTTP Host stay <host>, so the CDN
+# routes the request to your service. xHTTP defaults to mode=packet-up, the mode
+# every CDN can carry (plain request/response, no streaming bodies); override
+# with XHTTP_MODE=stream-up (CDN must stream request bodies) or auto.
+#
 # Certificate pinning is OFF by default. Cloud Run / Google-managed leaf certs
 # rotate regularly, and a pinned leaf makes the client fail with "no internet"
 # the day the cert changes. Opt in with PIN=1 if you really want it.
@@ -59,6 +66,11 @@ fp = os.environ["FP"]
 pin = os.environ.get("CERT_SHA256_B64", "")
 ech = os.environ.get("ECH_B64", "")
 out_dir = os.environ["OUT_DIR"]
+cdn = os.environ.get("CDN_ADDRESS", "").strip()
+addr = cdn or host          # what the client dials
+xmode = os.environ.get("XHTTP_MODE", "packet-up")
+if xmode not in ("auto", "packet-up", "stream-up", "stream-one"):
+    xmode = "packet-up"
 
 PROTOS = [
     # proto,   ws path,        tag
@@ -68,29 +80,43 @@ PROTOS = [
     ("ss",     "/ss-saeka",     "ss"),
 ]
 
+# Reuse settings for xHTTP connections. hMaxReusableSecs is kept well under
+# Cloud Run's 3600s request cap so a connection is retired and replaced by the
+# client before the platform cuts it mid-transfer.
+XMUX = {
+    "maxConcurrency": "16-32",
+    "maxConnections": 0,
+    "cMaxReuseTimes": 0,
+    "hMaxRequestTimes": "600-900",
+    "hMaxReusableSecs": "1800-3000",
+    "hKeepAlivePeriod": 0,
+}
+
 q = urllib.parse.quote
 
 
-def transport_query(path):
+def transport_query(path, kind="ws"):
     parts = [
         ("security", "tls"), ("sni", host), ("fp", fp),
-        ("type", "ws"), ("host", host), ("path", path),
+        ("type", kind), ("host", host), ("path", path),
     ]
+    if kind == "xhttp":
+        parts.append(("mode", xmode))
     if ech:
         parts.append(("ech", ech))
     return "&".join(f"{k}={q(v, safe='')}" for k, v in parts)
 
 
-def share_link(proto, path, label):
-    tq = transport_query(path)
+def share_link(proto, path, label, kind="ws"):
+    tq = transport_query(path, kind)
     if proto == "vless":
-        return f"vless://{q(uid, safe='')}@{host}:{port}?encryption=none&{tq}#{label}"
+        return f"vless://{q(uid, safe='')}@{addr}:{port}?encryption=none&{tq}#{label}"
     if proto == "trojan":
-        return f"trojan://{q(uid, safe='')}@{host}:{port}?{tq}#{label}"
+        return f"trojan://{q(uid, safe='')}@{addr}:{port}?{tq}#{label}"
     if proto == "vmess":
         # vmess:// is base64 of a JSON object (v2rayN format), not a normal URI.
         obj = {
-            "v": "2", "ps": label, "add": host, "port": str(port), "id": uid,
+            "v": "2", "ps": label, "add": addr, "port": str(port), "id": uid,
             "aid": "0", "scy": "auto", "net": "ws", "type": "none",
             "host": host, "path": path, "tls": "tls", "sni": host, "fp": fp, "alpn": "",
         }
@@ -98,52 +124,63 @@ def share_link(proto, path, label):
     if proto == "ss":
         # ss:// userinfo is base64(method:password), then host:port and query.
         userinfo = base64.urlsafe_b64encode(f"aes-256-gcm:{uid}".encode()).decode().rstrip("=")
-        return f"ss://{userinfo}@{host}:{port}?{tq}#{label}"
+        return f"ss://{userinfo}@{addr}:{port}?{tq}#{label}"
 
 
-def outbound(proto, path, tag):
+def outbound(proto, path, tag, kind="ws"):
     if proto == "vless":
-        settings = {"vnext": [{"address": host, "port": port,
+        settings = {"vnext": [{"address": addr, "port": port,
                                "users": [{"id": uid, "encryption": "none"}]}]}
     elif proto == "vmess":
-        settings = {"vnext": [{"address": host, "port": port,
+        settings = {"vnext": [{"address": addr, "port": port,
                                "users": [{"id": uid, "alterId": 0, "security": "auto"}]}]}
     elif proto == "trojan":
-        settings = {"servers": [{"address": host, "port": port, "password": uid}]}
+        settings = {"servers": [{"address": addr, "port": port, "password": uid}]}
     else:  # ss
-        settings = {"servers": [{"address": host, "port": port,
+        settings = {"servers": [{"address": addr, "port": port,
                                  "method": "aes-256-gcm", "password": uid}]}
     tls = {"serverName": host, "fingerprint": fp}
     if ech:
         tls["echConfigList"] = ech
     if pin:
         tls["pinnedPeerCertificateChainSha256"] = [pin]
+    stream = {"network": kind, "security": "tls", "tlsSettings": tls}
+    if kind == "xhttp":
+        stream["xhttpSettings"] = {"host": host, "path": path, "mode": xmode, "xmux": XMUX}
+    else:
+        stream["wsSettings"] = {"path": path, "host": host}
     return {
-        "tag": f"saeka-{tag}",
+        "tag": f"saeka-{tag}" + ("-xhttp" if kind == "xhttp" else ""),
         "protocol": "shadowsocks" if proto == "ss" else proto,
         "settings": settings,
-        "streamSettings": {
-            "network": "ws",
-            "security": "tls",
-            "tlsSettings": tls,
-            "wsSettings": {"path": path, "host": host},
-        },
+        "streamSettings": stream,
     }
 
 
 links = []
 for proto, path, tag in PROTOS:
     links.append(share_link(proto, path, f"saeka-{tag}-ws"))
-    full = {"outbounds": [outbound(proto, path, tag)]}
     jf = os.path.join(out_dir, f"{host}-{tag}-outbound.json")
     with open(jf, "w") as fh:
-        json.dump(full, fh, indent=2)
+        json.dump({"outbounds": [outbound(proto, path, tag)]}, fh, indent=2)
         fh.write("\n")
-    print(f"[+] Xray outbound ({proto}): {jf}")
+    print(f"[+] Xray outbound ({proto}, ws): {jf}")
+
+    # xHTTP twin of every protocol (server path = <ws path>-xh)
+    xpath = path + "-xh"
+    if proto in ("vless", "trojan"):
+        links.append(share_link(proto, xpath, f"saeka-{tag}-xhttp", "xhttp"))
+    xf = os.path.join(out_dir, f"{host}-{tag}-xhttp-outbound.json")
+    with open(xf, "w") as fh:
+        json.dump({"outbounds": [outbound(proto, xpath, tag, "xhttp")]}, fh, indent=2)
+        fh.write("\n")
+    print(f"[+] Xray outbound ({proto}, xhttp {xmode}): {xf}")
 
 with open(os.environ["LINKS_FILE"], "w") as fh:
     fh.write("\n".join(links) + "\n")
 
+if cdn:
+    print(f"\n[+] CDN mode: dialing {cdn}:{port}, SNI/Host = {host}")
 print("\n[+] Share links:")
 print("\n".join(links))
 PY
@@ -175,6 +212,7 @@ EOF
 fi
 
 echo ""
+echo "[i] vmess/ss have xHTTP outbound JSON only (no standard share-link form)."
 echo "[i] Using a non-UUID id like 'saeka' works with Xray itself, but some mobile"
 echo "    clients insist on a UUID for vless/vmess. If an app rejects the link,"
 echo "    switch to the trojan or ss link, or change the id in common/config-*.json."

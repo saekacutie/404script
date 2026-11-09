@@ -290,6 +290,12 @@ def check_bash(path: Path, text: str) -> FileResult:
 
 def check_node(path: Path, text: str) -> FileResult:
     res = FileResult(str(path), "javascript", True)
+    if "@@" in text:
+        # Build template (e.g. panel/src/app.js): @@TOKENS@@ are substituted at
+        # build time, so it is not valid JS until then. The built output is
+        # what gets checked.
+        res.add(0, 0, "warning", "build template with @@placeholders@@ - skipped (check the built file instead)")
+        return res
     node = shutil.which("node")
     if not node:
         res.add(0, 0, "error", "node not found on PATH — cannot syntax-check JS")

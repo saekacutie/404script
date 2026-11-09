@@ -90,7 +90,8 @@
         "network": "xhttp",
         "xhttpSettings": {
           "path": "/saeka-tojirp-xh",
-          "mode": "auto"
+          "mode": "auto",
+          "scStreamUpServerSecs": "10-25"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -218,7 +219,8 @@
         "network": "xhttp",
         "xhttpSettings": {
           "path": "/vmess-saeka-xh",
-          "mode": "auto"
+          "mode": "auto",
+          "scStreamUpServerSecs": "10-25"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -347,7 +349,8 @@
         "network": "xhttp",
         "xhttpSettings": {
           "path": "/vless-saeka-xh",
-          "mode": "auto"
+          "mode": "auto",
+          "scStreamUpServerSecs": "10-25"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -462,7 +465,8 @@
         "network": "xhttp",
         "xhttpSettings": {
           "path": "/ss-saeka-xh",
-          "mode": "auto"
+          "mode": "auto",
+          "scStreamUpServerSecs": "10-25"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -512,7 +516,8 @@
         "network": "xhttp",
         "xhttpSettings": {
           "path": "/saeka-tojirp-h2",
-          "mode": "auto"
+          "mode": "auto",
+          "scStreamUpServerSecs": "10-25"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -545,7 +550,8 @@
         "network": "xhttp",
         "xhttpSettings": {
           "path": "/vmess-saeka-h2",
-          "mode": "auto"
+          "mode": "auto",
+          "scStreamUpServerSecs": "10-25"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -578,7 +584,8 @@
         "network": "xhttp",
         "xhttpSettings": {
           "path": "/vless-saeka-h2",
-          "mode": "auto"
+          "mode": "auto",
+          "scStreamUpServerSecs": "10-25"
         },
         "sockopt": {
           "tcpFastOpen": true,
@@ -611,7 +618,8 @@
         "network": "xhttp",
         "xhttpSettings": {
           "path": "/ss-saeka-h2",
-          "mode": "auto"
+          "mode": "auto",
+          "scStreamUpServerSecs": "10-25"
         },
         "sockopt": {
           "tcpFastOpen": true,

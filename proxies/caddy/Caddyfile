@@ -40,7 +40,9 @@
         reverse_proxy 127.0.0.1:10001
     }
     handle /saeka-tojirp-xh* {
-        reverse_proxy 127.0.0.1:10002
+        reverse_proxy 127.0.0.1:10002 {
+            flush_interval -1
+        }
     }
     handle /saeka-tojirp* {
         reverse_proxy 127.0.0.1:10000
@@ -58,7 +60,9 @@
         reverse_proxy 127.0.0.1:10004
     }
     handle /vmess-saeka-xh* {
-        reverse_proxy 127.0.0.1:10005
+        reverse_proxy 127.0.0.1:10005 {
+            flush_interval -1
+        }
     }
     handle /vmess-saeka* {
         reverse_proxy 127.0.0.1:10003
@@ -76,7 +80,9 @@
         reverse_proxy 127.0.0.1:10007
     }
     handle /vless-saeka-xh* {
-        reverse_proxy 127.0.0.1:10008
+        reverse_proxy 127.0.0.1:10008 {
+            flush_interval -1
+        }
     }
     handle /vless-saeka* {
         reverse_proxy 127.0.0.1:10006
@@ -94,7 +100,9 @@
         reverse_proxy 127.0.0.1:10010
     }
     handle /ss-saeka-xh* {
-        reverse_proxy 127.0.0.1:10011
+        reverse_proxy 127.0.0.1:10011 {
+            flush_interval -1
+        }
     }
     handle /ss-saeka* {
         reverse_proxy 127.0.0.1:10009
@@ -102,16 +110,24 @@
 
     # --- H2-labeled XHTTP routes - Xray's xhttp is NOT real HTTP/2 ---
     handle /saeka-tojirp-h2* {
-        reverse_proxy 127.0.0.1:10016
+        reverse_proxy 127.0.0.1:10016 {
+            flush_interval -1
+        }
     }
     handle /vmess-saeka-h2* {
-        reverse_proxy 127.0.0.1:10017
+        reverse_proxy 127.0.0.1:10017 {
+            flush_interval -1
+        }
     }
     handle /vless-saeka-h2* {
-        reverse_proxy 127.0.0.1:10018
+        reverse_proxy 127.0.0.1:10018 {
+            flush_interval -1
+        }
     }
     handle /ss-saeka-h2* {
-        reverse_proxy 127.0.0.1:10019
+        reverse_proxy 127.0.0.1:10019 {
+            flush_interval -1
+        }
     }
 
     handle {
