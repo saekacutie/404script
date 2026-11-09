@@ -11,26 +11,35 @@ import server  # noqa: E402
 
 
 class FakeGCS(BaseHTTPRequestHandler):
-    obj, gen = None, 0
+    """Name-aware fake bucket: objs[name] = (bytes, generation)."""
+    objs = {}
     lock = threading.Lock()
 
     def log_message(self, *a): pass
 
+    @staticmethod
+    def reset():
+        FakeGCS.objs = {}
+
     def do_GET(self):
+        path = urllib.parse.urlsplit(self.path).path
+        name = urllib.parse.unquote(path.split("/o/", 1)[1])
         with FakeGCS.lock:
-            if FakeGCS.obj is None:
-                self.send_response(404); self.end_headers(); return
-            b = FakeGCS.obj
-            self.send_response(200); self.send_header("x-goog-generation", str(FakeGCS.gen))
+            if name not in FakeGCS.objs:
+                self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers(); return
+            b, gen = FakeGCS.objs[name]
+            self.send_response(200); self.send_header("x-goog-generation", str(gen))
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
 
     def do_POST(self):
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         n = int(self.headers["Content-Length"]); body = self.rfile.read(n)
+        name = q["name"][0]
         with FakeGCS.lock:
-            if int(q["ifGenerationMatch"][0]) != FakeGCS.gen:
+            gen = FakeGCS.objs.get(name, (b"", 0))[1]
+            if int(q["ifGenerationMatch"][0]) != gen:
                 self.send_response(412); self.send_header("Content-Length", "0"); self.end_headers(); return
-            FakeGCS.obj, FakeGCS.gen = body, FakeGCS.gen + 1
+            FakeGCS.objs[name] = (body, gen + 1)
             self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{}")
 
 
@@ -72,7 +81,7 @@ class T(unittest.TestCase):
         return server.Store()
 
     def test_gcs_cas_two_nodes(self):
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeGCS); FakeGCS.obj, FakeGCS.gen = None, 0
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeGCS); FakeGCS.reset()
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         a, b = self._store(srv.server_port), self._store(srv.server_port)
         self.assertEqual(a.mode, "gcs")
@@ -135,6 +144,52 @@ class T(unittest.TestCase):
         server.ENGINE = "openresty"
         self.assertFalse(server.engine_support("grpc")[0]); self.assertTrue(server.engine_support("ws")[0])
         server.ENGINE = "unknown"
+
+    def test_registry_finds_multiple_servers(self):
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeGCS); FakeGCS.reset()
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        a, b = self._store(srv.server_port), self._store(srv.server_port)
+        ra, rb = server.Registry(a), server.Registry(b)
+        server.probe_host = lambda h, timeout=3.0: not h.startswith("dead")
+        old = os.environ.get("K_SERVICE")
+        try:
+            os.environ["K_SERVICE"] = "proxy-a"
+            self.assertTrue(ra.register("proxy-a-123.us-east1.run.app", server.region_info("us-east1", "t")))
+            self.assertIsNone(ra.own_host_ok("evil-123.us-east1.run.app"))      # spoofed Host refused
+            self.assertIsNone(ra.own_host_ok("proxy-a-1.example.com"))
+            os.environ["K_SERVICE"] = "proxy-b"
+            self.assertTrue(rb.register("proxy-b-123.asia-southeast1.run.app", server.region_info("asia-southeast1", "t")))
+            os.environ["K_SERVICE"] = "dead-c"
+            rc = server.Registry(self._store(srv.server_port))
+            self.assertTrue(rc.register("dead-c-1.europe-west1.run.app"))
+            for r, cur, n in ((ra, "proxy-a-123.us-east1.run.app", 3), (rb, "proxy-b-123.asia-southeast1.run.app", 3)):
+                rows = r.list(cur)
+                self.assertEqual(len(rows), n)
+                self.assertTrue(rows[0]["current"] and rows[0]["alive"])
+                by = {x["host"]: x for x in rows}
+                self.assertTrue(by["proxy-a-123.us-east1.run.app"]["alive"] and by["proxy-b-123.asia-southeast1.run.app"]["alive"])
+                self.assertFalse(by["dead-c-1.europe-west1.run.app"]["alive"])
+                self.assertEqual(by["proxy-b-123.asia-southeast1.run.app"]["cc"], "SG")
+            # re-registering never duplicates and keeps first-seen
+            os.environ["K_SERVICE"] = "proxy-a"
+            ra.register("proxy-a-123.us-east1.run.app", force=True)
+            self.assertEqual(len(ra.list("proxy-a-123.us-east1.run.app")), 3)
+        finally:
+            os.environ["K_SERVICE"] = old or ""
+            if not old: os.environ.pop("K_SERVICE", None)
+            srv.shutdown()
+
+    def test_registry_local_mode_and_gcs_down(self):
+        os.environ.pop("PANEL_BUCKET", None)
+        r = server.Registry(server.Store())
+        os.environ.pop("K_SERVICE", None)
+        self.assertTrue(r.register("solo-1.us-central1.run.app"))
+        self.assertEqual([x["host"] for x in r.list("solo-1.us-central1.run.app", probe=False)], ["solo-1.us-central1.run.app"])
+        s = self._store(1)                                    # GCS unreachable: still lists itself, explains why
+        r2 = server.Registry(s)
+        r2.register("solo-2.us-central1.run.app")
+        rows = r2.list("solo-2.us-central1.run.app", probe=False)
+        self.assertEqual(len(rows), 1); self.assertTrue(r2.err)
 
 
 if __name__ == "__main__":

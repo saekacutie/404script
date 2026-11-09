@@ -272,21 +272,39 @@ function setStatus(ok) {
 
 /* ------------------------------------------------------------------ share links */
 function b64(s) { return btoa(unescape(encodeURIComponent(s))); }
+const PRE_ADDR = [['host', 'Server'], ['firebase', 'Firebase', 'firebase.google.com'], ['googleapis', 'GoogleAPIs', 'www.googleapis.com']];
+const PRE_SNI = [['host', 'Server'], ['firebase', 'Firebase', 'firebase.google.com'], ['googleapis', 'GoogleAPIs', 'www.googleapis.com'], ['maya', 'Maya', 'maya.ph']];
+const HOST_OK = /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 function defaults() {
-  return { addr: location.hostname, port: location.port || '443', sni: location.hostname, fp: 'chrome' };
+  return { host: location.hostname, am: 'host', addr: '', port: location.port || '443', sm: 'host', sni: '', fp: 'chrome' };
+}
+/* Resolve what actually goes into a link. The Host header is always the real
+   server (Cloud Run routes on it); Address and SNI may be fronting hosts. */
+function eff(o) {
+  const host = (o.host || location.hostname || '').trim();
+  const pick = (mode, custom, pre) => {
+    if (mode === 'host') return host;
+    const p = pre.find(x => x[0] === mode);
+    return p && p[2] ? p[2] : ((custom || '').trim() || host);
+  };
+  return { host: host, addr: pick(o.am, o.addr, PRE_ADDR), port: String(o.port || '443'), sni: pick(o.sm, o.sni, PRE_SNI), fp: o.fp || 'chrome', tag: o.tag };
 }
 function tp(ep, o) {
   const q = encodeURIComponent, p = [['security', 'tls'], ['sni', o.sni], ['fp', o.fp]];
-  if (ep.network === 'ws') p.push(['type', 'ws'], ['host', o.sni], ['path', ep.path]);
-  else if (ep.network === 'httpupgrade') p.push(['type', 'httpupgrade'], ['host', o.sni], ['path', ep.path]);
-  else if (ep.network === 'xhttp' || ep.network === 'splithttp') p.push(['type', 'xhttp'], ['host', o.sni], ['path', ep.path], ['mode', ep.mode || 'auto']);
-  else if (ep.network === 'grpc') p.push(['type', 'grpc'], ['serviceName', ep.service], ['mode', 'gun'], ['alpn', 'h2']);
+  if (ep.network === 'ws') p.push(['type', 'ws'], ['host', o.host], ['path', ep.path]);
+  else if (ep.network === 'httpupgrade') p.push(['type', 'httpupgrade'], ['host', o.host], ['path', ep.path]);
+  else if (ep.network === 'xhttp' || ep.network === 'splithttp') p.push(['type', 'xhttp'], ['host', o.host], ['path', ep.path], ['mode', ep.mode || 'auto']);
+  else if (ep.network === 'grpc') p.push(['type', 'grpc'], ['serviceName', ep.service], ['authority', o.host], ['mode', 'gun'], ['alpn', 'h2']);
   return p.map(kv => kv[0] + '=' + q(kv[1])).join('&');
 }
-function uriFor(ep, o) {
-  if (ep.family === 'ssh') return 'wss://' + o.sni + ep.path;
+function uriFor(ep, raw) {
+  const o = eff(raw);
+  if (ep.family === 'ssh') {
+    const fronted = o.addr !== o.host || o.sni !== o.host || o.port !== '443';
+    return 'wss://' + o.host + ep.path + (fronted ? '#connect=' + o.addr + ':' + o.port + '&sni=' + o.sni : '');
+  }
   const q = encodeURIComponent, host = o.addr.indexOf(':') > -1 && o.addr[0] !== '[' ? '[' + o.addr + ']' : o.addr;
-  const label = 'saeka-' + ep.family + '-' + ep.variant + '-' + ((S.server && S.server.region) || 'srv');
+  const label = 'saeka-' + ep.family + '-' + ep.variant + '-' + (o.tag || (S.server && S.server.region) || 'srv');
   const hp = host + ':' + o.port;
   if (ep.family === 'vless') return 'vless://' + q(ep.cred.id) + '@' + hp + '?encryption=none&' + tp(ep, o) + '#' + q(label);
   if (ep.family === 'trojan') return 'trojan://' + q(ep.cred.password) + '@' + hp + '?' + tp(ep, o) + '#' + q(label);
@@ -297,7 +315,7 @@ function uriFor(ep, o) {
   if (ep.family === 'vmess') {
     const net = ep.network === 'splithttp' ? 'xhttp' : ep.network;
     const j = { v: '2', ps: label, add: o.addr, port: String(o.port), id: ep.cred.id, aid: '0', scy: 'auto', net: net,
-      type: net === 'grpc' ? 'gun' : net === 'xhttp' ? (ep.mode || 'auto') : 'none', host: o.sni,
+      type: net === 'grpc' ? 'gun' : net === 'xhttp' ? (ep.mode || 'auto') : 'none', host: o.host,
       path: net === 'grpc' ? ep.service : ep.path, tls: 'tls', sni: o.sni, fp: o.fp, alpn: net === 'grpc' ? 'h2' : '' };
     return 'vmess://' + b64(JSON.stringify(j));
   }
@@ -479,21 +497,103 @@ async function loadDetail() {
     const d = r.data, first = !S.eps.length;
     S.eps = d.endpoints || []; S.cfg = d.config; S.ssh = d.ssh_users || [];
     S.server = d.server; S.authed = true;
-    if (!S.opts) { try { S.opts = Object.assign(defaults(), JSON.parse(ls.get('sp_opts') || '{}')); } catch (e) { S.opts = defaults(); } syncInputs(); }
+    if (!S.opts) { try { S.opts = Object.assign(defaults(), JSON.parse(ls.get('sp_opts2') || '{}')); } catch (e) { S.opts = defaults(); } if (!HOST_OK.test(S.opts.host || '')) S.opts.host = location.hostname; syncInputs(); }
     setLocked(false); renderServer(S.server); renderCreds(); renderLiveLine(); renderFilters(); renderTickets(); renderBoard();
     if (first) { document.dispatchEvent(new Event('unlocked')); setTimeout(testEdge, 900); }
   } catch (e) { /* the pulse loop reports connectivity; keep last data */ }
 }
-function syncInputs() { $('#fAddr').value = S.opts.addr; $('#fPort').value = S.opts.port; $('#fSni').value = S.opts.sni; $('#fFp').value = S.opts.fp; }
-['fAddr', 'fPort', 'fSni'].forEach(id => $('#' + id).addEventListener('input', e => {
-  const el = e.target, v = el.value.trim(), key = { fAddr: 'addr', fPort: 'port', fSni: 'sni' }[id];
-  const bad = !v || (key === 'port' && !(/^\d+$/.test(v) && +v > 0 && +v < 65536)) || /[\s/?#@]/.test(v);
-  el.style.borderColor = bad ? 'var(--verm)' : '';
-  if (bad) return;
-  S.opts[key] = v; ls.set('sp_opts', JSON.stringify(S.opts)); S.sig = ''; renderTickets();
-}));
-$('#fFp').addEventListener('change', e => { S.opts.fp = e.target.value; ls.set('sp_opts', JSON.stringify(S.opts)); S.sig = ''; renderTickets(); });
-$('#fReset').addEventListener('click', () => { S.opts = defaults(); ls.set('sp_opts', '{}'); syncInputs(); $$('.bar .inp').forEach(i => i.style.borderColor = ''); S.sig = ''; renderTickets(); toast('Reset to this host'); });
+function saveOpts() { ls.set('sp_opts2', JSON.stringify(S.opts)); S.sig = ''; renderTickets(); }
+function presetChips(el, list, key, mkey) {
+  el.innerHTML = list.map(p => '<button type="button" class="chip" data-m="' + p[0] + '" aria-pressed="' + (S.opts[mkey] === p[0]) + '">' + esc(p[1]) + '</button>').join('');
+  $$('.chip', el).forEach(b => b.onclick = () => {
+    S.opts[mkey] = b.dataset.m; $('#' + (key === 'addr' ? 'fAddr' : 'fSni')).style.borderColor = ''; saveOpts(); syncInputs();
+  });
+}
+function syncInputs() {
+  const o = S.opts, e = eff(o);
+  const set = (id, v) => { const el = $('#' + id); if (el !== document.activeElement) el.value = v; };
+  set('fAddr', e.addr); set('fPort', e.port); set('fSni', e.sni); set('fHost', e.host); $('#fFp').value = o.fp;
+  presetChips($('#pAddr'), PRE_ADDR, 'addr', 'am'); presetChips($('#pSni'), PRE_SNI, 'sni', 'sm');
+  $('#hostNote').textContent = e.host === location.hostname ? 'this server' : 'picked server';
+}
+function bindField(id, fn) {
+  $('#' + id).addEventListener('input', ev => {
+    const el = ev.target, v = el.value.trim();
+    const bad = !v || /[\s/?#@]/.test(v) || (id === 'fPort' && !(/^\d+$/.test(v) && +v > 0 && +v < 65536)) || (id !== 'fPort' && !HOST_OK.test(v));
+    el.style.borderColor = bad ? 'var(--verm)' : '';
+    if (bad) return;
+    fn(v); saveOpts(); syncInputs();
+  });
+}
+bindField('fAddr', v => { const p = PRE_ADDR.find(x => x[2] === v); S.opts.am = p ? p[0] : (v === S.opts.host ? 'host' : 'custom'); S.opts.addr = v; });
+bindField('fSni', v => { const p = PRE_SNI.find(x => x[2] === v); S.opts.sm = p ? p[0] : (v === S.opts.host ? 'host' : 'custom'); S.opts.sni = v; });
+bindField('fPort', v => { S.opts.port = v; });
+bindField('fHost', v => { S.opts.host = v; });
+$('#fFp').addEventListener('change', e => { S.opts.fp = e.target.value; saveOpts(); });
+$('#fReset').addEventListener('click', () => { S.opts = defaults(); ls.set('sp_opts2', '{}'); syncInputs(); $$('.bar .inp').forEach(i => i.style.borderColor = ''); S.sig = ''; renderTickets(); toast('Reset to this server'); });
+
+/* ---- find servers: everything deployed with this panel in the project */
+let SRV = [];
+function srvRow(r) {
+  const cur = r.host === S.opts.host;
+  return '<div class="srv' + (r.alive ? '' : ' off') + (cur ? ' sel' : '') + '" data-h="' + esc(r.host) + '">' +
+    '<div class="srv-f">' + flagHTML(r.cc) + '</div>' +
+    '<div class="srv-m"><b>' + esc(r.service || r.host.split('-')[0]) + (r.current ? ' <em>this panel</em>' : '') + '</b>' +
+    '<code title="' + esc(r.host) + '">' + esc(r.host) + '</code>' +
+    '<small>' + esc([r.city, r.country].filter(Boolean).join(', ') || r.region || 'unknown region') + '</small></div>' +
+    '<div class="srv-s"><span class="pill ' + (r.alive ? 'up' : 'down') + '"><span class="dot"></span>' + (r.alive ? 'online' : 'no answer') + '</span>' +
+    '<button type="button" class="btn ' + (cur ? 'done' : 'pri') + '" data-use ' + (r.alive || cur ? '' : 'disabled') + '>' + (cur ? 'In use' : 'Use') + '</button></div></div>';
+}
+function renderSrv() {
+  const box = $('#srvList');
+  if (!SRV.length) { box.innerHTML = '<p class="note">No servers registered yet. A deploy registers itself the first time its panel is opened.</p>'; }
+  else {
+    box.innerHTML = SRV.map(srvRow).join('');
+    $$('.srv', box).forEach(el => {
+      const r = SRV.find(x => x.host === el.dataset.h);
+      $('[data-use]', el).onclick = () => useServer(r);
+    });
+  }
+  const online = SRV.filter(r => r.alive).length;
+  $('#srvCopyAll').disabled = !online || !S.eps.length;
+  $('#dlgSrvT').textContent = SRV.length > 1 ? 'Found ' + SRV.length + ' servers' : SRV.length ? 'Found 1 server' : 'Find servers';
+}
+function useServer(r) {
+  S.opts.host = r.host;
+  S.opts.tag = r.region || '';
+  saveOpts(); syncInputs(); renderSrv();
+  if (r.lat != null) { try { Globe.focus(r.lon, r.lat); } catch (e) { /* globe optional */ } }
+  toast('Links now use ' + r.host);
+}
+async function findServers() {
+  if (!S.authed) { toast('Unlock the panel to list servers', true); openLogin(); return; }
+  const dlg = $('#dlgSrv'); if (!dlg.open) dlg.showModal();
+  const btn = $('#srvRefresh'); btn.disabled = true; $('#srvErr').textContent = '';
+  $('#srvList').innerHTML = '<p class="note">' + SPIN + ' scanning this project&hellip;</p>';
+  try {
+    const r = await api('/api/servers', null, 15000);
+    if (r.status === 401) { dlg.close(); setLocked(true); toast('Session expired - unlock again', true); openLogin(); return; }
+    if (!r.ok || !r.data || !r.data.ok) throw new Error('http ' + r.status);
+    SRV = r.data.servers || [];
+    const cur = SRV.find(x => x.current);
+    if (cur && S.opts.host === location.hostname) S.opts.host = cur.host;
+    renderSrv();
+    if (r.data.store !== 'gcs') $('#srvErr').textContent = 'Shared storage is off for this deploy, so only this server is known. Redeploy with deploy.sh to enable discovery.';
+    else if (r.data.error) $('#srvErr').textContent = 'Registry storage problem: ' + r.data.error;
+  } catch (e) {
+    $('#srvList').innerHTML = '<p class="note">Could not scan servers. Check the connection and try again.</p>';
+  } finally { btn.disabled = false; }
+}
+$('#findSrv').addEventListener('click', findServers);
+$('#recenter').addEventListener('click', () => { if (S.authed) findServers(); });
+$('#srvRefresh').addEventListener('click', findServers);
+$('#srvCopyAll').addEventListener('click', e => {
+  const live = SRV.filter(r => r.alive), list = shown().filter(x => x.supported !== false);
+  if (!live.length || !list.length) return toast('Nothing to copy with this filter', true);
+  const out = [];
+  live.forEach(r => list.forEach(ep => out.push(uriFor(ep, Object.assign({}, S.opts, { host: r.host, tag: r.region || 'srv' })))));
+  copyWith(e.currentTarget, out.join('\n'), out.length + ' links from ' + live.length + ' servers');
+});
 $('#copyAll').addEventListener('click', e => {
   const list = shown().filter(x => x.supported !== false);
   if (!list.length) return toast('Nothing to copy with this filter', true);
@@ -744,7 +844,7 @@ const Globe = (function () {
   new ResizeObserver(resize).observe(wrap);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) kick(); });
   resize(); kick();
-  return { setServer, setVisitors, recenter: () => srv && focusTo(srv.lon, srv.lat * .8 + 6) };
+  return { setServer, setVisitors, focus: (lon, lat) => { lastTouch = 0; focusTo(lon, lat * .8 + 6); }, recenter: () => srv && focusTo(srv.lon, srv.lat * .8 + 6) };
 })();
 
 /* ------------------------------------------------------------------ reveal on scroll + start */

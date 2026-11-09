@@ -635,7 +635,7 @@ build_failure_details() {
     gcloud builds describe "$id" --project="$PROJECT_ID" \
         --format='value(status,statusDetail,failureInfo.detail)' 2>&1 | grep -v '^$' | head -n 3 | cut -c1-200 | sed 's/^/    /' || true
     gcloud logging read "resource.type=\"build\" AND resource.labels.build_id=\"${id}\"" --project="$PROJECT_ID" \
-        --order=asc --limit=60 --format='value(textPayload)' 2>/dev/null | grep -v '^$' | tail -n 15 | cut -c1-200 | sed 's/^/    | /' || true
+        --order=desc --limit=40 --format='value(textPayload)' 2>/dev/null | grep -v '^$' | head -n 18 | tac | cut -c1-200 | sed 's/^/    | /' || true
     return 0
 }
 
@@ -789,7 +789,10 @@ else
         return 1
     }
 
-    PANEL_BUCKET=$(printf '%s' "${PROJECT_ID}-${SERVICE_NAME}-panel" | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-' | cut -c1-63 | sed 's/-*$//')
+    # One bucket per PROJECT (not per service): every deploy from this script
+    # writes itself into panel/servers.json there, so the panel's "Find server"
+    # lists them all. Each service keeps its own counter object in it.
+    PANEL_BUCKET=$(printf '%s' "${PROJECT_ID}-saeka-panel" | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-' | cut -c1-63 | sed 's/-*$//')
     if gcloud storage buckets describe "gs://${PANEL_BUCKET}" --project="$PROJECT_ID" >/dev/null 2>&1 \
         || { can storage.buckets.create \
              && run_quiet "Creating visitor-counter bucket" panel-bucket.log \
@@ -811,7 +814,8 @@ else
         warn "Could not create a counter bucket - the panel will count per instance only."
     fi
     echo ""
-    ENV_VARS="ADS_MODE=${ADS_MODE},PANEL_KEY=${PANEL_KEY},PANEL_BUCKET=${PANEL_BUCKET}"
+    PANEL_OBJECT="panel/state-${SERVICE_NAME}.json"
+    ENV_VARS="ADS_MODE=${ADS_MODE},PANEL_KEY=${PANEL_KEY},PANEL_BUCKET=${PANEL_BUCKET},PANEL_OBJECT=${PANEL_OBJECT}"
 fi
 
 # --allow-unauthenticated makes the service public by granting allUsers the
@@ -934,10 +938,24 @@ sys.exit(0 if s.get("store") == "gcs" and s.get("synced") is True else 1)'; then
         fi
     fi
 
+    # The panel registers itself on its first request (the health/public checks
+    # above); show what this project's registry now holds.
+    REGISTRY_COUNT=""
+    if [ -n "$PANEL_BUCKET" ] && [ "$PANEL_UP" = "yes" ]; then
+        sleep 2
+        REGISTRY_COUNT=$(gcloud storage cat "gs://${PANEL_BUCKET}/panel/servers.json" 2>/dev/null \
+            | python3 -I -c 'import json,sys
+try: print(len(json.load(sys.stdin).get("servers",{})))
+except Exception: pass' 2>/dev/null || true)
+    fi
+
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
     echo -e "  ${CYAN}                      WEB PANEL${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
     echo -e "  ${CYAN}PANEL URL  ${GREEN}${PANEL_URL}${RESET}"
+    if [ -n "$REGISTRY_COUNT" ]; then
+        echo -e "  ${CYAN}SERVERS    ${GREEN}${REGISTRY_COUNT} panel server(s) registered in this project - use \"Find server\" in the panel${RESET}"
+    fi
     echo -e "  ${CYAN}ACCESS KEY ${GREEN}${PANEL_KEY}${RESET}   ${YELLOW}(save it - needed to unlock credentials)${RESET}"
     if [ "$PANEL_UP" = "yes" ]; then
         echo -e "  ${CYAN}STATUS     ${GREEN}panel is answering${RESET}"
