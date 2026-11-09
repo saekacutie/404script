@@ -21,7 +21,7 @@ deploy_vm.py
 gh_verify.py
 generate-client-links.sh
 regions.sh
-ws_bridge.py
+/ws_bridge.py
 panel/src/
 panel/vendor/
 panel/build.py
