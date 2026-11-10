@@ -11,35 +11,26 @@ import server  # noqa: E402
 
 
 class FakeGCS(BaseHTTPRequestHandler):
-    """Name-aware fake bucket: objs[name] = (bytes, generation)."""
-    objs = {}
+    obj, gen = None, 0
     lock = threading.Lock()
 
     def log_message(self, *a): pass
 
-    @staticmethod
-    def reset():
-        FakeGCS.objs = {}
-
     def do_GET(self):
-        path = urllib.parse.urlsplit(self.path).path
-        name = urllib.parse.unquote(path.split("/o/", 1)[1])
         with FakeGCS.lock:
-            if name not in FakeGCS.objs:
-                self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers(); return
-            b, gen = FakeGCS.objs[name]
-            self.send_response(200); self.send_header("x-goog-generation", str(gen))
+            if FakeGCS.obj is None:
+                self.send_response(404); self.end_headers(); return
+            b = FakeGCS.obj
+            self.send_response(200); self.send_header("x-goog-generation", str(FakeGCS.gen))
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
 
     def do_POST(self):
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         n = int(self.headers["Content-Length"]); body = self.rfile.read(n)
-        name = q["name"][0]
         with FakeGCS.lock:
-            gen = FakeGCS.objs.get(name, (b"", 0))[1]
-            if int(q["ifGenerationMatch"][0]) != gen:
+            if int(q["ifGenerationMatch"][0]) != FakeGCS.gen:
                 self.send_response(412); self.send_header("Content-Length", "0"); self.end_headers(); return
-            FakeGCS.objs[name] = (body, gen + 1)
+            FakeGCS.obj, FakeGCS.gen = body, FakeGCS.gen + 1
             self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{}")
 
 
@@ -118,7 +109,7 @@ class T(unittest.TestCase):
         return server.Store()
 
     def test_gcs_cas_two_nodes(self):
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeGCS); FakeGCS.reset()
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeGCS); FakeGCS.obj, FakeGCS.gen = None, 0
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         a, b = self._store(srv.server_port), self._store(srv.server_port)
         self.assertEqual(a.mode, "gcs")

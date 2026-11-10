@@ -659,129 +659,6 @@ class Store:
 STORE = Store()
 
 
-# --------------------------------------------------------------- server registry
-# Every panel node writes itself into one shared object (panel/servers.json in the
-# bucket). All deploys in a project share that bucket, so "Find server" can list
-# every *.run.app that was deployed with this panel (same user / path / keys).
-HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9-]{1,63})*\.run\.app$")
-REG_OBJ = os.environ.get("PANEL_REGISTRY_OBJECT", "panel/servers.json")
-REG_KEEP = 30 * 86400
-
-
-def probe_host(host, timeout=3.0):
-    """True when host answers this panel's health endpoint (tests replace this)."""
-    try:
-        req = urllib.request.Request("https://%s%s/api/health" % (host, BASE), headers={"User-Agent": "saeka-registry"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status == 200 and bool(json.loads(r.read().decode()).get("ok"))
-    except Exception:
-        return False
-
-
-class Registry:
-    def __init__(self, store):
-        self.store = store
-        self.lock = threading.Lock()
-        self.local = {}            # host -> entry (also the fallback when GCS is unreachable)
-        self.registered = 0.0
-        self.err = ""
-        self.cache = (0.0, None)
-
-    def own_host_ok(self, host):
-        host = (host or "").split(":")[0].lower()
-        svc = (os.environ.get("K_SERVICE") or "").lower()
-        if not HOST_RE.match(host or ""):
-            return None
-        if svc and not host.startswith(svc + "-"):
-            return None            # a spoofed Host header can't add somebody else's name
-        return host
-
-    def entry(self, host, info):
-        now = int(time.time())
-        old = self.local.get(host, {})
-        return {"host": host, "service": os.environ.get("K_SERVICE") or host.split("-")[0],
-                "region": (info or {}).get("region", ""), "city": (info or {}).get("city", ""),
-                "cc": (info or {}).get("cc", ""), "engine": ENGINE, "first": old.get("first", now), "seen": now}
-
-    def register(self, host, info=None, force=False):
-        host = self.own_host_ok(host)
-        if not host:
-            return False
-        now = time.time()
-        with self.lock:
-            if not force and host in self.local and now - self.registered < 300:
-                return True
-            if self.store.mode == "gcs" and now < self.store.retry_at and host in self.local:
-                return True
-            e = self.entry(host, info)
-            self.local[host] = e
-            self.registered = now
-        if self.store.mode != "gcs":
-            return True
-        try:
-            for _ in range(6):
-                remote, gen = self.store._gcs_get(REG_OBJ)
-                servers = dict((remote or {}).get("servers") or {})
-                cur = servers.get(host) or {}
-                servers[host] = dict(e, first=cur.get("first", e["first"]))
-                for h in [h for h, v in servers.items() if now - int(v.get("seen", 0)) > REG_KEEP and h != host]:
-                    del servers[h]
-                try:
-                    self.store._gcs_put({"v": 1, "servers": servers}, gen, REG_OBJ)
-                    self.err = ""
-                    self.cache = (0.0, None)
-                    return True
-                except urllib.error.HTTPError as ex:
-                    if ex.code != 412:
-                        raise
-        except Exception as ex:
-            self.err = explain_gcs_error(ex)
-            with self.lock:
-                self.registered = 0.0       # retry on the next request
-        return False
-
-    def load(self):
-        if self.store.mode == "gcs":
-            t, v = self.cache
-            if v is not None and time.time() - t < 8:
-                return v
-            try:
-                remote, _ = self.store._gcs_get(REG_OBJ)
-                servers = dict((remote or {}).get("servers") or {})
-                for h, e in self.local.items():
-                    servers.setdefault(h, e)
-                self.err = ""
-                self.cache = (time.time(), servers)
-                return servers
-            except Exception as ex:
-                self.err = explain_gcs_error(ex)
-        return dict(self.local)
-
-    def list(self, current=None, probe=True):
-        servers = self.load()
-        rows = [dict(v) for v in servers.values() if isinstance(v, dict) and HOST_RE.match(str(v.get("host", "")))]
-        cur = (current or "").split(":")[0].lower()
-        alive = {}
-        if probe:
-            def work(h):
-                alive[h] = (h == cur) or probe_host(h)
-            ts = [threading.Thread(target=work, args=(r["host"],), daemon=True) for r in rows[:30]]
-            [t.start() for t in ts]
-            [t.join(5) for t in ts]
-        for r in rows:
-            r["current"] = r["host"] == cur
-            r["alive"] = bool(alive.get(r["host"])) if probe else None
-            info = region_info(r.get("region"), "registry") if r.get("region") else None
-            if info:
-                r.update(city=info["city"], country=info["country"], cc=info["cc"], lat=info["lat"], lon=info["lon"],
-                         flag=info["flag"])
-        rows.sort(key=lambda r: (not r["current"], not r.get("alive"), r.get("service", ""), r["host"]))
-        return rows
-
-
-REGISTRY = Registry(STORE)
-
-
 # --------------------------------------------------------------------------
 # server registry: every panel-deployed *.run.app service registers itself in
 # one shared object, so "Find server" can list all of them (same credentials,
@@ -875,6 +752,9 @@ class Registry:
     # ---- own identity
     def note_host(self, host):
         h = (host or "").split(":")[0].strip().lower()
+        svc = (os.environ.get("K_SERVICE") or "").lower()
+        if svc and not h.startswith(svc + "-"):
+            return                       # a forged Host / X-Forwarded-Host can't register someone else's name
         if not self.self_host and HOST_RE.match(h):
             self.self_host = h
             threading.Thread(target=self.heartbeat, kwargs={"force": True}, daemon=True).start()
@@ -983,12 +863,12 @@ class Registry:
             info = Where._from_host(h) or region_info(e.get("region", ""), "registry") or {}
             r = {"up": True, "ms": 0, "err": ""} if h == me else res[h]
             fp = e.get("cred", "")
-            if not r["up"] and now - e.get("ts", now) > REG_STALE and h != me:
+            if not r["up"] and now - (e.get("ts") or e.get("seen") or now) > REG_STALE and h != me:
                 dead.append(h)
             out.append({"host": h, "self": h == me, "up": r["up"], "ms": r["ms"], "err": r["err"],
                         "region": info.get("region", ""), "city": info.get("city", ""), "country": info.get("country", ""),
                         "cc": info.get("cc", ""), "service": e.get("service", ""), "engine": e.get("engine", ""),
-                        "seen": int(e.get("ts", 0)), "manual": bool(e.get("manual")),
+                        "seen": int(e.get("ts") or e.get("seen") or 0), "manual": bool(e.get("manual")),
                         "same_login": (not fp or not mine_fp or fp == mine_fp)})
         if dead:
             def drop(s):
@@ -1176,15 +1056,8 @@ class Handler(BaseHTTPRequestHandler):
         if r == "/api/health":
             return self._json(200, {"ok": True, "panel": "saeka", "up": int(time.time() - STARTED)})
         if r == "/api/public":
-            REGISTRY.register(self._host(), WHERE.get(self._host())[0])
+            REGISTRY.note_host(self._host())
             return self._json(200, self._public())
-        if r == "/api/servers":
-            if not self._authed():
-                return self._json(401, {"ok": False, "error": "locked"})
-            REGISTRY.register(self._host(), WHERE.get(self._host())[0])
-            rows = REGISTRY.list(self._host(), probe=True)
-            return self._json(200, {"ok": True, "servers": rows, "store": STORE.mode, "error": REGISTRY.err,
-                                    "users": ssh_users()})
         if r == "/api/server":
             if not self._authed():
                 return self._json(401, {"ok": False, "error": "locked"})
@@ -1221,7 +1094,6 @@ class Handler(BaseHTTPRequestHandler):
             REGISTRY.note_host(self._host())
             geo = GEO.lookup(ip, block=bool(body.get("nv")))
             STORE.pulse(vid, ip, bool(body.get("nv")), geo)
-            REGISTRY.register(self._host(), WHERE.get(self._host())[0])
             return self._json(200, self._public(authed))
         if r == "/api/login":
             now = time.time()

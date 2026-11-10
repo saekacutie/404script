@@ -291,9 +291,6 @@ function validHost(v) {
   return six.indexOf(':') > -1 && /^[0-9A-Fa-f:.]+$/.test(six);
 }
 function b64(s) { return btoa(unescape(encodeURIComponent(s))); }
-const PRE_ADDR = [['host', 'Server'], ['firebase', 'Firebase', 'firebase.google.com'], ['googleapis', 'GoogleAPIs', 'www.googleapis.com']];
-const PRE_SNI = [['host', 'Server'], ['firebase', 'Firebase', 'firebase.google.com'], ['googleapis', 'GoogleAPIs', 'www.googleapis.com'], ['maya', 'Maya', 'maya.ph']];
-const HOST_OK = /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 function defaults() {
   return { host: location.hostname, port: location.port || '443', fp: 'chrome', addrMode: 'host', addr: '', sniMode: 'host', sni: '', insecure: false };
 }
@@ -911,7 +908,7 @@ const Globe = (function () {
   new ResizeObserver(resize).observe(wrap);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) kick(); });
   resize(); kick();
-  return { setServer, setVisitors, focus: (lon, lat) => { lastTouch = 0; focusTo(lon, lat * .8 + 6); }, recenter: () => srv && focusTo(srv.lon, srv.lat * .8 + 6) };
+  return { setServer, setVisitors, recenter: () => srv && focusTo(srv.lon, srv.lat * .8 + 6) };
 })();
 
 /* ------------------------------------------------------------------ reveal on scroll + start */

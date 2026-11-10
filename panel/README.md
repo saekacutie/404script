@@ -31,7 +31,7 @@ names are defaults, edit `ADDR_PRE` / `SNI_PRE` in `src/app.js` to change them.
 
 ## Find server (several deployments)
 Every deployment registers itself (heartbeat every 5 min) in one registry object,
-`gs://<project>-saeka-servers/panel/servers.json`. `deploy.sh` creates the bucket on the first deploy and
+`gs://<project>-saeka-panel/panel/servers.json` (the project-wide bucket; each service keeps its own counter object in it). `deploy.sh` creates the bucket on the first deploy and
 every later deploy (any service name, any region) finds and joins it. **Find server** health-checks
 all of them (`/api/health`), flags servers whose credentials differ, and *Use* points every link at the
 chosen server's host. Credentials and paths come from the same config, so they are identical.
@@ -43,7 +43,7 @@ Services scaled to zero still show up; a cold start answers the health check.
 | --- | --- |
 | `PANEL_KEY` | access key (deploy.sh generates one and prints it; set it explicitly so every instance shares it) |
 | `PANEL_BUCKET` | GCS bucket for the shared counter |
-| `PANEL_REGISTRY_BUCKET` | GCS bucket for the server registry (project-wide; falls back to `PANEL_BUCKET`) |
+| `PANEL_REGISTRY_BUCKET` | optional: keep the registry in another bucket than the counters (default `PANEL_BUCKET`) |
 | `PANEL_PUBLIC_HOST` | override this service's `*.run.app` host (normally worked out from the metadata server) |
 | `PANEL_REGION` | force a region id, e.g. `asia-southeast1` |
 | `PANEL_GEOIP=0` | disable visitor/egress GeoIP lookups (ip-api.com) |

@@ -813,29 +813,9 @@ else
         PANEL_BUCKET=""
         warn "Could not create a counter bucket - the panel will count per instance only."
     fi
-    # Server registry: ONE bucket per project (not per service), so every
-    # deployment - any service name, any region - registers in the same place and
-    # "Find server" in the panel lists all of them. The first deploy creates it,
-    # later deploys find it. Falls back to the counter bucket if it can't be made.
-    PANEL_REGISTRY_BUCKET=$(printf '%s' "${PROJECT_ID}-saeka-servers" | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-' | cut -c1-63 | sed 's/-*$//')
-    if gcloud storage buckets describe "gs://${PANEL_REGISTRY_BUCKET}" --project="$PROJECT_ID" >/dev/null 2>&1; then
-        echo -e "  ${GREEN}Found existing server registry: gs://${PANEL_REGISTRY_BUCKET}${RESET}"
-    elif can storage.buckets.create \
-         && run_quiet "Creating server registry bucket" panel-registry.log \
-            gcloud storage buckets create "gs://${PANEL_REGISTRY_BUCKET}" --project="$PROJECT_ID" \
-                --location="$REGION" --uniform-bucket-level-access --public-access-prevention --quiet; then
-        rm -f panel-registry.log
-        echo -e "  ${GREEN}Created server registry: gs://${PANEL_REGISTRY_BUCKET}${RESET}"
-    else
-        PANEL_REGISTRY_BUCKET=""
-        warn "Could not create the server registry bucket - Find server will only see servers sharing the counter bucket."
-    fi
-    if [ -n "$PANEL_REGISTRY_BUCKET" ]; then
-        bucket_grant "${RUNTIME_SA:-$(resolve_runtime_sa)}" "$PANEL_REGISTRY_BUCKET" \
-            || { warn "Couldn't grant registry access: ${BUCKET_IAM_ERR}"; }
-    fi
     echo ""
-    ENV_VARS="ADS_MODE=${ADS_MODE},PANEL_KEY=${PANEL_KEY},PANEL_BUCKET=${PANEL_BUCKET},PANEL_REGISTRY_BUCKET=${PANEL_REGISTRY_BUCKET}"
+    PANEL_OBJECT="panel/state-${SERVICE_NAME}.json"
+    ENV_VARS="ADS_MODE=${ADS_MODE},PANEL_KEY=${PANEL_KEY},PANEL_BUCKET=${PANEL_BUCKET},PANEL_OBJECT=${PANEL_OBJECT}"
 fi
 
 # --allow-unauthenticated makes the service public by granting allUsers the
