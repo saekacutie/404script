@@ -392,7 +392,7 @@ echo -e "  ${YELLOW}5) Traefik    - full protocol support incl. gRPC (recommende
 echo -e "  ${YELLOW}6) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
 echo -e "  ${YELLOW}7) SSH        - standalone SSH-over-WS (+ UDPGW), not the VLESS/etc stack${RESET}"
 echo -e "  ${YELLOW}8) OVPN       - standalone WS relay to a REAL OpenVPN server on a VM${RESET}"
-echo -e "  ${YELLOW}9) REALITY    - Cloud Run first, then your VM IP (REALITY/OpenVPN on the VM) + SSH-WS${RESET}"
+echo -e "  ${YELLOW}9) REALITY    - Cloud Run first, then an auto-created VM IP running REALITY (+ SSH-WS)${RESET}"
 echo ""
 read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-9] (Default 1): ${RESET}")" ENGINE_CHOICE
 
@@ -745,17 +745,43 @@ elif [ "$PROXY_ENV" == "reality" ]; then
     echo -e "  ${CYAN}==================================================${RESET}"
     echo -e "  ${GREEN}        REALITY COMBO - CLOUD RUN + VM IP${RESET}"
     echo -e "  ${CYAN}==================================================${RESET}"
-    echo -e "  ${YELLOW}Traffic enters Cloud Run first, then this service relays it to the${RESET}"
-    echo -e "  ${YELLOW}VM's static IP (REALITY / OpenVPN run there - see deploy_vm.py).${RESET}"
-    echo -e "  ${YELLOW}Deploy the VM FIRST and have its IP ready.${RESET}"
+    echo -e "  ${YELLOW}Traffic enters Cloud Run first, then it is relayed to a VM's static${RESET}"
+    echo -e "  ${YELLOW}IP where Xray VLESS+REALITY listens. This script creates and${RESET}"
+    echo -e "  ${YELLOW}configures that VM for you (Compute Engine, ~3 minutes).${RESET}"
     echo ""
-    read -r -p "$(echo -e "  ${CYAN}VM static IP or hostname: ${RESET}")" TCP_HOST
-    TCP_HOST=$(printf '%s' "$TCP_HOST" | tr -cd 'A-Za-z0-9.-')
-    read -r -p "$(echo -e "  ${CYAN}REALITY port on the VM [443]: ${RESET}")" TCP_PORT
-    TCP_PORT=$(printf '%s' "${TCP_PORT:-443}" | tr -cd '0-9')
-    [ -n "$TCP_PORT" ] || TCP_PORT=443
-    read -r -p "$(echo -e "  ${CYAN}OpenVPN port on the same VM (blank = skip): ${RESET}")" OVPN_PORT
-    OVPN_PORT=$(printf '%s' "$OVPN_PORT" | tr -cd '0-9')
+    TCP_HOST=""; TCP_PORT=443; OVPN_PORT=""; REALITY_LINK=""; REALITY_NAMES=""
+    VM_NAME="${SERVICE_NAME}-vm"
+    read -r -p "$(echo -e "  ${CYAN}Create the REALITY VM automatically? [Y/n]: ${RESET}")" VM_AUTO
+    if ! [[ "${VM_AUTO:-y}" =~ ^[Nn] ]]; then
+        read -r -p "$(echo -e "  ${CYAN}REALITY server name [www.microsoft.com]: ${RESET}")" R_SNI
+        R_SNI=$(printf '%s' "${R_SNI:-www.microsoft.com}" | tr -cd 'A-Za-z0-9.,-')
+        VM_JSON="$(mktemp)"
+        echo -e "  ${CYAN}Creating the VM and configuring REALITY (this takes a few minutes)...${RESET}"
+        if python3 -I "${SCRIPT_DIR}/deploy_vm.py" --auto --region "$REGION" --name "$VM_NAME" \
+                --reality-port 443 --sni "$R_SNI" --out "$VM_JSON"; then
+            eval "$(python3 -I - "$VM_JSON" <<'PYEOF'
+import json, shlex, sys
+d = json.load(open(sys.argv[1]))
+r = d.get("reality", {})
+print("TCP_HOST=%s" % shlex.quote(d.get("ip", "")))
+print("TCP_PORT=%s" % shlex.quote(str(r.get("port", 443))))
+print("REALITY_LINK=%s" % shlex.quote(r.get("link", "")))
+print("REALITY_NAMES=%s" % shlex.quote(",".join(r.get("serverNames", []))))
+PYEOF
+)"
+            echo -e "  ${GREEN}REALITY VM ready at ${TCP_HOST}:${TCP_PORT}${RESET}"
+        else
+            warn "Automatic VM setup did not finish - you can enter an existing VM address instead."
+        fi
+        rm -f "$VM_JSON"
+    fi
+    if [ -z "$TCP_HOST" ]; then
+        read -r -p "$(echo -e "  ${CYAN}VM static IP or hostname (blank = none yet): ${RESET}")" TCP_HOST
+        TCP_HOST=$(printf '%s' "$TCP_HOST" | tr -cd 'A-Za-z0-9.-')
+        read -r -p "$(echo -e "  ${CYAN}REALITY port on the VM [443]: ${RESET}")" TCP_PORT
+        TCP_PORT=$(printf '%s' "${TCP_PORT:-443}" | tr -cd '0-9')
+        [ -n "$TCP_PORT" ] || TCP_PORT=443
+    fi
     read -r -p "$(echo -e "  ${CYAN}SSH username [saeka]: ${RESET}")" SSH_UNAME
     SSH_UNAME=$(printf '%s' "${SSH_UNAME:-saeka}" | tr -dc 'a-z0-9_-')
     read -r -p "$(echo -e "  ${CYAN}SSH password (blank = auto-generate): ${RESET}")" SSH_PW
@@ -770,9 +796,6 @@ elif [ "$PROXY_ENV" == "reality" ]; then
     fi
     echo ""
     ENV_VARS="^@^SSH_USERS=${SSH_UNAME}:${SSH_PW}@TCP_UPSTREAM_HOST=${TCP_HOST}@TCP_UPSTREAM_PORT=${TCP_PORT}"
-    if [ -n "$OVPN_PORT" ] && [ -n "$TCP_HOST" ]; then
-        ENV_VARS="${ENV_VARS}@OVPN_UPSTREAM_HOST=${TCP_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
-    fi
 else
     # ------------------------------------------------------------------
     # SAEKA PANEL (served at the service root by every Xray engine above).
@@ -1038,11 +1061,17 @@ elif [ "$PROXY_ENV" == "reality" ]; then
     echo -e "  ${CYAN}                  REALITY COMBO${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
     echo -e "  ${GREEN}Path: /saeka-tcp${RESET}   -> ${TCP_HOST:-<no VM>}:${TCP_PORT}  (REALITY on the VM)"
-    [ -z "${OVPN_PORT:-}" ] || echo -e "  ${GREEN}Path: /saeka-ovpn${RESET}  -> ${TCP_HOST}:${OVPN_PORT}  (OpenVPN on the VM)"
     echo -e "  ${GREEN}Path: /saeka-ssh${RESET}   -> SSH on Cloud Run (user ${SSH_UNAME})"
     echo -e "  ${CYAN}Entry:  wss://${CLEAN_HOST}/saeka-tcp   (Cloud Run first, then the VM IP)${RESET}"
-    echo -e "  ${YELLOW}Use the vless:// REALITY link printed by deploy_vm.py; point your${RESET}"
-    echo -e "  ${YELLOW}client's WS wrapper at the wss:// entry above, same as the OVPN relay.${RESET}"
+    if [ -n "${REALITY_LINK:-}" ]; then
+        echo -e "  ${CYAN}REALITY link (VM ${TCP_HOST}):${RESET}"
+        echo -e "  ${GREEN}${REALITY_LINK}${RESET}"
+        echo -e "  ${CYAN}Server names accepted: ${REALITY_NAMES}${RESET}"
+        echo -e "  ${YELLOW}Also saved at ~/.deploy_vm/${VM_NAME}-reality.txt${RESET}"
+    else
+        echo -e "  ${YELLOW}Use the vless:// REALITY link printed by deploy_vm.py.${RESET}"
+    fi
+    echo -e "  ${YELLOW}Point your client's WS wrapper at the wss:// entry above, same as the OVPN relay.${RESET}"
 else
     echo -e "  ${CYAN}                    PATHS & PROTOCOLS${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
