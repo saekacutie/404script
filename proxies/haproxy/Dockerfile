@@ -20,7 +20,7 @@ COPY proxies/haproxy/haproxy.cfg /usr/local/etc/haproxy/haproxy.cfg
 COPY proxies/haproxy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Saeka panel (served under /saeka-panel, separate process on 127.0.0.1:10030)
+# Saeka panel (served at the service root /, separate process on 127.0.0.1:10030)
 COPY panel/server.py panel/index.html /opt/panel/
 ENV PANEL_ENGINE=haproxy
 

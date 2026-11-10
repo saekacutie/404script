@@ -48,7 +48,10 @@
         <div class="tip" id="tip"></div>
         <div class="hud tr"><span class="lg s"></span>server &nbsp;<span class="lg v"></span>visitor<br>drag to rotate</div>
         <div class="hud bl" id="hudC">&nbsp;</div>
-        <button class="btn" id="recenter" type="button">Find server</button>
+        <div class="globe-actions">
+          <button class="btn" id="recenter" type="button" aria-label="Recenter globe on the server"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>Recenter</button>
+          <button class="btn pri" id="findServer" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>Find server<em id="srvCount" hidden></em></button>
+        </div>
       </div>
     </div>
   </section>
@@ -56,7 +59,7 @@
   <section class="sec rv" id="access" aria-labelledby="hAccess">
     <div class="sec-h">
       <h2 id="hAccess">Boarding passes</h2>
-      <p>One pass per inbound. Every link is built live from the Xray config running in this container, with the host you are connected through.</p>
+      <p>One pass per inbound, built live from the running Xray config.</p>
       <span class="sp"></span>
       <button class="btn pri" id="copyAll" type="button" hidden>Copy shown links</button>
     </div>
@@ -65,21 +68,21 @@
         <div class="creds" id="creds"></div>
         <div class="live" id="liveLine"></div>
         <div class="bar">
-          <div class="fld"><label for="fAddr"><span>Address</span></label>
-            <input class="inp" id="fAddr" spellcheck="false" autocomplete="off">
-            <div class="chips pre" id="pAddr" role="group" aria-label="Address presets"></div></div>
-          <div class="fld"><label for="fPort"><span>Port</span></label><input class="inp" id="fPort" inputmode="numeric" autocomplete="off"></div>
-          <div class="fld"><label for="fSni"><span>SNI</span></label>
-            <input class="inp" id="fSni" spellcheck="false" autocomplete="off">
-            <div class="chips pre" id="pSni" role="group" aria-label="SNI presets"></div></div>
-          <div class="fld"><label for="fHost"><span>Host header</span></label>
-            <input class="inp" id="fHost" spellcheck="false" autocomplete="off" title="The real *.run.app host. Cloud Run routes on this, so keep it on your server.">
-            <div class="fnote" id="hostNote">your server</div></div>
-          <div class="fld"><label for="fFp"><span>Fingerprint</span></label>
-            <select class="inp" id="fFp"><option>chrome</option><option>firefox</option><option>safari</option><option>ios</option><option>android</option><option>edge</option><option>random</option></select></div>
-          <div class="bar-a"><button class="btn" id="findSrv" type="button">Find servers</button>
-          <button class="btn" id="fReset" type="button">Reset</button></div>
+          <label class="fld w2"><span>Server (Host header)</span>
+            <span class="row"><input class="inp" id="fHost" spellcheck="false" autocomplete="off"><button class="btn ico" id="fFind" type="button" aria-label="Find servers"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg></button></span></label>
+          <label class="fld"><span>Address</span>
+            <select class="inp" id="fAddrMode"></select></label>
+          <label class="fld"><span>SNI</span>
+            <select class="inp" id="fSniMode"></select></label>
+          <label class="fld"><span>Port</span><input class="inp" id="fPort" inputmode="numeric" autocomplete="off"></label>
+          <label class="fld"><span>Fingerprint</span>
+            <select class="inp" id="fFp"><option>chrome</option><option>firefox</option><option>safari</option><option>ios</option><option>android</option><option>edge</option><option>random</option></select></label>
+          <label class="fld w2" id="wAddr" hidden><span>Custom address</span><input class="inp" id="fAddr" spellcheck="false" autocomplete="off" placeholder="host or IP"></label>
+          <label class="fld w2" id="wSni" hidden><span>Custom SNI</span><input class="inp" id="fSni" spellcheck="false" autocomplete="off" placeholder="host name"></label>
+          <label class="chk"><input type="checkbox" id="fInsecure"><span>Skip certificate check</span></label>
+          <button class="btn" id="fReset" type="button">Reset</button>
         </div>
+        <p class="route" id="route"></p>
         <div class="filters">
           <div class="grp"><span>Protocol</span><div class="chips" id="fFam"></div></div>
           <div class="grp"><span>Transport</span><div class="chips" id="fVar"></div></div>
@@ -94,7 +97,7 @@
         </div>
         <div class="lock-cta">
           <h3>Credentials are locked</h3>
-          <p>Enter the panel access key to reveal live credentials, share links, QR codes and visitor locations.</p>
+          <p>Enter the access key to reveal credentials and links.</p>
           <button class="btn pri" id="ctaUnlock" type="button">Unlock panel</button>
         </div>
       </div>
@@ -104,7 +107,7 @@
   <section class="sec rv" id="boardSec" aria-labelledby="hBoard" hidden>
     <div class="sec-h">
       <h2 id="hBoard">Departures</h2>
-      <p>Inbound health. &ldquo;Inbound&rdquo; is a TCP connect to the Xray listener inside the container; &ldquo;Edge&rdquo; is a real WebSocket handshake from your browser through the public URL and the proxy engine.</p>
+      <p>Inbound = TCP connect inside the container. Edge = real WebSocket handshake from your browser.</p>
       <span class="sp"></span>
       <button class="btn" id="testAll" type="button">Test edge</button>
     </div>
@@ -115,7 +118,7 @@
   </section>
 
   <section class="sec rv" id="activity" aria-labelledby="hAct">
-    <div class="sec-h"><h2 id="hAct">Traffic to this panel</h2><p>Real browsers only: a visit counts once per browser per 30 minutes.</p></div>
+    <div class="sec-h"><h2 id="hAct">Traffic to this panel</h2><p>One visit per browser per 30 minutes.</p></div>
     <div class="act">
       <div>
         <svg class="chart" id="chart" viewBox="0 0 560 170" role="img" aria-label="Visits per day, last 14 days"></svg>
@@ -131,7 +134,6 @@
 <footer>
   <span><b>SAEKA PANEL</b> &middot; UDP by nano</span>
   <span id="fNode">node &mdash;</span>
-  <span>Visitor IPs are never stored. Only country and city of recent visits are kept.</span>
 </footer>
 
 <div id="toasts" aria-live="polite" aria-atomic="false"></div>
@@ -140,12 +142,26 @@
   <form method="dialog" id="loginForm" autocomplete="off">
     <div class="dl-h"><h3 id="dlgLoginT">Unlock panel</h3><button class="btn ico" type="button" data-close aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
     <div class="dl-b">
-      <p>Enter the access key that deploy.sh printed (<span style="font-family:var(--ff-m)">PANEL_KEY</span>).</p>
+      <p>Enter the panel access key.</p>
       <label class="fld"><span>Access key</span><input class="inp" id="keyIn" type="password" autocomplete="current-password" spellcheck="false" required></label>
       <div class="err" id="loginErr" role="alert"></div>
       <button class="btn pri" id="loginGo" type="submit">Unlock</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="dlgSrv" class="wide" aria-labelledby="dlgSrvT">
+  <div class="dl-h"><h3 id="dlgSrvT">Find server</h3><button class="btn ico" type="button" data-close aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+  <div class="dl-b">
+    <p id="srvLead">Looking for servers deployed with this panel&hellip;</p>
+    <ul class="srv" id="srvList"></ul>
+    <form class="srv-add" id="srvAdd" autocomplete="off">
+      <input class="inp" id="srvHost" placeholder="name-123456789.region.run.app" spellcheck="false" aria-label="Add a run.app host">
+      <button class="btn" type="submit">Add</button>
+    </form>
+    <div class="err" id="srvErr" role="alert"></div>
+    <div class="dl-a"><button class="btn pri" id="srvScan" type="button">Scan again</button></div>
+  </div>
 </dialog>
 
 <dialog id="dlgQr" aria-labelledby="dlgQrT">

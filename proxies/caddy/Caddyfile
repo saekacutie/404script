@@ -130,8 +130,10 @@
         }
     }
 
+    # Everything that is not a tunnel path is the panel (served at the service root).
     handle {
-        root * /var/www/html
-        file_server
+        reverse_proxy 127.0.0.1:10030 {
+            header_up X-Panel-Xff {http.request.header.X-Forwarded-For}
+        }
     }
 }

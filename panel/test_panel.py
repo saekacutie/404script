@@ -43,6 +43,43 @@ class FakeGCS(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{}")
 
 
+class FakeGCS2(FakeGCS):
+    """Separate object store so the registry test never shares state with the counter test."""
+    obj, gen = None, 0
+    lock = threading.Lock()
+
+    def do_GET(self):
+        with FakeGCS2.lock:
+            if FakeGCS2.obj is None:
+                self.send_response(404); self.end_headers(); return
+            b = FakeGCS2.obj
+            self.send_response(200); self.send_header("x-goog-generation", str(FakeGCS2.gen))
+            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+
+    def do_POST(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        n = int(self.headers["Content-Length"]); body = self.rfile.read(n)
+        with FakeGCS2.lock:
+            if int(q["ifGenerationMatch"][0]) != FakeGCS2.gen:
+                self.send_response(412); self.send_header("Content-Length", "0"); self.end_headers(); return
+            FakeGCS2.obj, FakeGCS2.gen = body, FakeGCS2.gen + 1
+            self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{}")
+
+
+def peer_server(healthy=True):
+    class P(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self):
+            if self.path.endswith("/api/health") and healthy:
+                b = b'{"ok":true,"panel":"saeka","up":5}'; self.send_response(200)
+            else:
+                b = b"{}"; self.send_response(404)
+            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), P)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
 class T(unittest.TestCase):
     def test_flag(self):
         self.assertEqual(server.flag("us"), "\U0001F1FA\U0001F1F8")
@@ -145,51 +182,61 @@ class T(unittest.TestCase):
         self.assertFalse(server.engine_support("grpc")[0]); self.assertTrue(server.engine_support("ws")[0])
         server.ENGINE = "unknown"
 
-    def test_registry_finds_multiple_servers(self):
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeGCS); FakeGCS.reset()
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        a, b = self._store(srv.server_port), self._store(srv.server_port)
-        ra, rb = server.Registry(a), server.Registry(b)
-        server.probe_host = lambda h, timeout=3.0: not h.startswith("dead")
-        old = os.environ.get("K_SERVICE")
+    def test_registry_finds_every_deployment(self):
+        """Two deployments share one registry object; each sees the other; dead / foreign ones are flagged."""
+        import re
+        gcs = ThreadingHTTPServer(("127.0.0.1", 0), FakeGCS2); FakeGCS2.obj, FakeGCS2.gen = None, 0
+        threading.Thread(target=gcs.serve_forever, daemon=True).start()
+        peer_a, peer_b = peer_server(), peer_server(healthy=False)
+        saved = (server.HOST_RE, server.PEER_URL)
+        server.HOST_RE = re.compile(r"^[0-9.]+:[0-9]+$"); server.PEER_URL = "http://{host}{base}"
         try:
-            os.environ["K_SERVICE"] = "proxy-a"
-            self.assertTrue(ra.register("proxy-a-123.us-east1.run.app", server.region_info("us-east1", "t")))
-            self.assertIsNone(ra.own_host_ok("evil-123.us-east1.run.app"))      # spoofed Host refused
-            self.assertIsNone(ra.own_host_ok("proxy-a-1.example.com"))
-            os.environ["K_SERVICE"] = "proxy-b"
-            self.assertTrue(rb.register("proxy-b-123.asia-southeast1.run.app", server.region_info("asia-southeast1", "t")))
-            os.environ["K_SERVICE"] = "dead-c"
-            rc = server.Registry(self._store(srv.server_port))
-            self.assertTrue(rc.register("dead-c-1.europe-west1.run.app"))
-            for r, cur, n in ((ra, "proxy-a-123.us-east1.run.app", 3), (rb, "proxy-b-123.asia-southeast1.run.app", 3)):
-                rows = r.list(cur)
-                self.assertEqual(len(rows), n)
-                self.assertTrue(rows[0]["current"] and rows[0]["alive"])
-                by = {x["host"]: x for x in rows}
-                self.assertTrue(by["proxy-a-123.us-east1.run.app"]["alive"] and by["proxy-b-123.asia-southeast1.run.app"]["alive"])
-                self.assertFalse(by["dead-c-1.europe-west1.run.app"]["alive"])
-                self.assertEqual(by["proxy-b-123.asia-southeast1.run.app"]["cc"], "SG")
-            # re-registering never duplicates and keeps first-seen
-            os.environ["K_SERVICE"] = "proxy-a"
-            ra.register("proxy-a-123.us-east1.run.app", force=True)
-            self.assertEqual(len(ra.list("proxy-a-123.us-east1.run.app")), 3)
+            cfg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common", "config-noads.json")
+            server.XRAY_CONFIG = cfg; server._cfg_cache.update(mtime=None, data=None)
+            os.environ["PANEL_REGISTRY_BUCKET"] = "reg"
+            a, b = server.Registry(self._store(gcs.server_port)), server.Registry(self._store(gcs.server_port))
+            a.self_host = "127.0.0.1:%d" % peer_a.server_port
+            b.self_host = "127.0.0.1:%d" % peer_b.server_port
+            self.assertEqual(a.mode, "gcs")
+            self.assertTrue(a.heartbeat(force=True)); self.assertTrue(b.heartbeat(force=True))
+            la = a.listing()
+            self.assertEqual({x["host"] for x in la["servers"]}, {a.self_host, b.self_host})
+            me = next(x for x in la["servers"] if x["self"]); self.assertEqual(me["host"], a.self_host); self.assertTrue(me["up"])
+            other = next(x for x in la["servers"] if not x["self"])
+            self.assertFalse(other["up"])                      # peer_b answers 404 -> reported down, not hidden
+            self.assertTrue(other["same_login"])               # same config -> same credentials
+            self.assertEqual(la["servers"][0]["host"], a.self_host)
+            # manual add: a reachable panel is accepted, an unreachable one is refused
+            extra = peer_server()
+            a.add("127.0.0.1:%d" % extra.server_port)
+            self.assertEqual(len(a.listing()["servers"]), 3)
+            with self.assertRaises(ValueError): a.add("127.0.0.1:%d" % peer_b.server_port)
+            with self.assertRaises(ValueError): a.add("evil.example.com")
+            a.forget("127.0.0.1:%d" % extra.server_port)
+            self.assertEqual(len(b.listing()["servers"]), 2)    # b sees the removal through the shared object
+            with self.assertRaises(ValueError): a.forget(a.self_host)
+            # a different login on another deployment is flagged
+            b.mutate(lambda sv: sv[b.self_host].update(cred="deadbeef00"))
+            self.assertFalse(next(x for x in a.listing()["servers"] if x["host"] == b.self_host)["same_login"])
         finally:
-            os.environ["K_SERVICE"] = old or ""
-            if not old: os.environ.pop("K_SERVICE", None)
-            srv.shutdown()
+            server.HOST_RE, server.PEER_URL = saved
+            os.environ.pop("PANEL_REGISTRY_BUCKET", None)
+            for x in (gcs, peer_a, peer_b): x.shutdown()
 
-    def test_registry_local_mode_and_gcs_down(self):
-        os.environ.pop("PANEL_BUCKET", None)
+    def test_registry_local_creates_itself(self):
+        os.environ.pop("PANEL_BUCKET", None); os.environ.pop("PANEL_REGISTRY_BUCKET", None)
+        os.environ["PANEL_REGISTRY_FILE"] = os.path.join(tempfile.mkdtemp(), "r.json")
         r = server.Registry(server.Store())
-        os.environ.pop("K_SERVICE", None)
-        self.assertTrue(r.register("solo-1.us-central1.run.app"))
-        self.assertEqual([x["host"] for x in r.list("solo-1.us-central1.run.app", probe=False)], ["solo-1.us-central1.run.app"])
-        s = self._store(1)                                    # GCS unreachable: still lists itself, explains why
-        r2 = server.Registry(s)
-        r2.register("solo-2.us-central1.run.app")
-        rows = r2.list("solo-2.us-central1.run.app", probe=False)
-        self.assertEqual(len(rows), 1); self.assertTrue(r2.err)
+        self.assertEqual(r.mode, "local")
+        r.note_host("my-svc-123456789.asia-southeast1.run.app")
+        self.assertEqual(r.self_host, "my-svc-123456789.asia-southeast1.run.app")
+        self.assertTrue(r.heartbeat(force=True))               # no registry yet -> this call creates it
+        d = r.listing()
+        self.assertEqual([x["host"] for x in d["servers"]], [r.self_host])
+        self.assertEqual(d["servers"][0]["region"], "asia-southeast1")
+        r.note_host("evil.example.com"); self.assertEqual(r.self_host, "my-svc-123456789.asia-southeast1.run.app")
+        self.assertFalse(server.HOST_RE.match("a.b.example.com"))
+        self.assertTrue(server.HOST_RE.match("svc-abc-uc.a.run.app"))
 
 
 if __name__ == "__main__":

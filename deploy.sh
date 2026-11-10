@@ -741,7 +741,7 @@ elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     ENV_VARS="^@^OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
 else
     # ------------------------------------------------------------------
-    # SAEKA PANEL (served at /saeka-panel by every Xray engine above).
+    # SAEKA PANEL (served at the service root by every Xray engine above).
     #   PANEL_KEY    - access key that unlocks credentials / links in the UI.
     #                  Pre-set it with `PANEL_KEY=... ./deploy.sh`, type one
     #                  below, or let this script generate one.
@@ -775,10 +775,10 @@ else
     # real error in BUCKET_IAM_ERR instead of throwing it away.
     BUCKET_IAM_ERR=""
     bucket_grant() {
-        local sa="$1" out="" attempt
+        local sa="$1" bkt="${2:-$PANEL_BUCKET}" out="" attempt
         [ -n "$sa" ] || { BUCKET_IAM_ERR="runtime service account unknown"; return 1; }
         for attempt in 1 2 3; do
-            if out=$(gcloud storage buckets add-iam-policy-binding "gs://${PANEL_BUCKET}" \
+            if out=$(gcloud storage buckets add-iam-policy-binding "gs://${bkt}" \
                         --member="serviceAccount:${sa}" --role="roles/storage.objectAdmin" --quiet 2>&1); then
                 BUCKET_IAM_ERR=""
                 return 0
@@ -813,9 +813,29 @@ else
         PANEL_BUCKET=""
         warn "Could not create a counter bucket - the panel will count per instance only."
     fi
+    # Server registry: ONE bucket per project (not per service), so every
+    # deployment - any service name, any region - registers in the same place and
+    # "Find server" in the panel lists all of them. The first deploy creates it,
+    # later deploys find it. Falls back to the counter bucket if it can't be made.
+    PANEL_REGISTRY_BUCKET=$(printf '%s' "${PROJECT_ID}-saeka-servers" | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-' | cut -c1-63 | sed 's/-*$//')
+    if gcloud storage buckets describe "gs://${PANEL_REGISTRY_BUCKET}" --project="$PROJECT_ID" >/dev/null 2>&1; then
+        echo -e "  ${GREEN}Found existing server registry: gs://${PANEL_REGISTRY_BUCKET}${RESET}"
+    elif can storage.buckets.create \
+         && run_quiet "Creating server registry bucket" panel-registry.log \
+            gcloud storage buckets create "gs://${PANEL_REGISTRY_BUCKET}" --project="$PROJECT_ID" \
+                --location="$REGION" --uniform-bucket-level-access --public-access-prevention --quiet; then
+        rm -f panel-registry.log
+        echo -e "  ${GREEN}Created server registry: gs://${PANEL_REGISTRY_BUCKET}${RESET}"
+    else
+        PANEL_REGISTRY_BUCKET=""
+        warn "Could not create the server registry bucket - Find server will only see servers sharing the counter bucket."
+    fi
+    if [ -n "$PANEL_REGISTRY_BUCKET" ]; then
+        bucket_grant "${RUNTIME_SA:-$(resolve_runtime_sa)}" "$PANEL_REGISTRY_BUCKET" \
+            || { warn "Couldn't grant registry access: ${BUCKET_IAM_ERR}"; }
+    fi
     echo ""
-    PANEL_OBJECT="panel/state-${SERVICE_NAME}.json"
-    ENV_VARS="ADS_MODE=${ADS_MODE},PANEL_KEY=${PANEL_KEY},PANEL_BUCKET=${PANEL_BUCKET},PANEL_OBJECT=${PANEL_OBJECT}"
+    ENV_VARS="ADS_MODE=${ADS_MODE},PANEL_KEY=${PANEL_KEY},PANEL_BUCKET=${PANEL_BUCKET},PANEL_REGISTRY_BUCKET=${PANEL_REGISTRY_BUCKET}"
 fi
 
 # --allow-unauthenticated makes the service public by granting allUsers the
@@ -892,7 +912,7 @@ echo -e "  ${CYAN}CPU / RAM  ${GREEN}${CPU} vCPU / ${RAM}${RESET}"
 echo ""
 
 if [ "$STANDALONE" -eq 0 ]; then
-    PANEL_URL="https://${CLEAN_HOST}/saeka-panel"
+    PANEL_URL="https://${CLEAN_HOST}"
     PANEL_UP="no"
     for _ in 1 2 3 4 5 6 7 8; do
         if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "${PANEL_URL}/api/health" 2>/dev/null || true)" = "200" ]; then

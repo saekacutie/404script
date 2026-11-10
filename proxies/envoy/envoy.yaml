@@ -29,6 +29,8 @@ static_resources:
               - match: { prefix: "/saeka-panel" }
                 route: { cluster: panel_10030, timeout: 30s }
 
+              # Panel at the service root is the LAST route (see end of list).
+
               # SSH-over-WS - raw byte tunnel via
               # Xray's dokodemo-door inbound, same WS pattern as everything
               # else here. Paths don't overlap any other prefix, so order
@@ -89,6 +91,10 @@ static_resources:
                 route: { cluster: xray_10019, timeout: 0s, idle_timeout: 0s }
               - match: { prefix: "/ss-saeka" }
                 route: { cluster: xray_10009, timeout: 0s, idle_timeout: 0s }
+
+              # Panel at the service root: last route, so every tunnel prefix above wins first.
+              - match: { prefix: "/" }
+                route: { cluster: panel_10030, timeout: 30s }
 
           http_filters:
           - name: envoy.filters.http.router

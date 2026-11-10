@@ -6,6 +6,12 @@ http:
       service: panel-svc
       priority: 95
 
+    # Panel at the service root: lowest priority, so every tunnel path wins first.
+    panel-root:
+      rule: "PathPrefix(`/`)"
+      service: panel-svc
+      priority: 1
+
     # --- SSH-over-WS (raw byte tunnel) ---
     ssh-ws:
       rule: "PathPrefix(`/saeka-ssh`)"

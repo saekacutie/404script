@@ -20,7 +20,7 @@ COPY proxies/h2o/h2o.conf /etc/h2o/h2o.conf
 COPY proxies/h2o/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Saeka panel (served under /saeka-panel, separate process on 127.0.0.1:10030)
+# Saeka panel (served at the service root /, separate process on 127.0.0.1:10030)
 COPY panel/server.py panel/index.html /opt/panel/
 ENV PANEL_ENGINE=h2o
 

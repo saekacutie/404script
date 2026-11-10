@@ -40,7 +40,8 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-BASE = "/saeka-panel"
+BASE = ""                    # the panel lives at the service root: https://<service>.run.app/
+LEGACY_BASE = "/saeka-panel"   # old deployments / bookmarks keep working
 HERE = os.path.dirname(os.path.abspath(__file__))
 STARTED = time.time()
 
@@ -782,6 +783,251 @@ REGISTRY = Registry(STORE)
 
 
 # --------------------------------------------------------------------------
+# server registry: every panel-deployed *.run.app service registers itself in
+# one shared object, so "Find server" can list all of them (same credentials,
+# same paths) and the links can be pointed at any one of them.
+# --------------------------------------------------------------------------
+HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9-]{1,40}){1,2}\.run\.app$")
+PEER_URL = os.environ.get("PANEL_PEER_URL", "https://{host}{base}")     # tests point this at 127.0.0.1
+REG_STALE = 7 * 86400          # a server that has been down this long is dropped from the list
+REG_BEAT = 300                 # own heartbeat interval
+
+
+def cred_fingerprint(eps):
+    """Short hash of the credentials + routes this server accepts. Equal fingerprints = same login works."""
+    rows = sorted(json.dumps([e.get("tag"), e.get("path") or e.get("service"), e.get("cred")], sort_keys=True)
+                  for e in eps if e.get("cred"))
+    return hashlib.sha256("\n".join(rows).encode()).hexdigest()[:10] if rows else ""
+
+
+class Registry:
+    def __init__(self, store):
+        self.store = store
+        self.lock = threading.RLock()
+        self.bucket = os.environ.get("PANEL_REGISTRY_BUCKET", "").strip() or store.bucket
+        self.obj = os.environ.get("PANEL_REGISTRY_OBJECT", "panel/servers.json")
+        self.file = os.environ.get("PANEL_REGISTRY_FILE", "/tmp/saeka-panel-servers.json")
+        self.mode = "gcs" if self.bucket else "local"
+        self.self_host = os.environ.get("PANEL_PUBLIC_HOST", "").strip().lower()
+        self.err = ""
+        self.beat_at = 0.0
+        self.checks = {}         # host -> (time, result)
+
+    # ---- storage (GCS object with generation precondition, or a local file)
+    def _read(self):
+        if self.mode == "gcs":
+            url = "%s/storage/v1/b/%s/o/%s?alt=media" % (
+                self.store.gcs_base, urllib.parse.quote(self.bucket, safe=""), urllib.parse.quote(self.obj, safe=""))
+            try:
+                with self.store._gcs_req(url) as r:
+                    return json.loads(r.read().decode()), int(r.headers.get("x-goog-generation", "0") or 0)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return {}, 0
+                raise
+        try:
+            with open(self.file, "r", encoding="utf-8") as fh:
+                return json.load(fh), 0
+        except Exception:
+            return {}, 0
+
+    def _write(self, data, gen):
+        if self.mode == "gcs":
+            url = "%s/upload/storage/v1/b/%s/o?uploadType=media&name=%s&ifGenerationMatch=%d" % (
+                self.store.gcs_base, urllib.parse.quote(self.bucket, safe=""), urllib.parse.quote(self.obj, safe=""), gen)
+            with self.store._gcs_req(url, json.dumps(data).encode(), "application/json"):
+                return
+        tmp = "%s.%d.%s.tmp" % (self.file, os.getpid(), secrets.token_hex(3))   # unique: never clobbers a parallel writer
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, self.file)
+
+    @staticmethod
+    def _norm(d):
+        sv = d.get("servers") if isinstance(d, dict) else None
+        out = {}
+        for h, e in (sv or {}).items():
+            if isinstance(e, dict) and HOST_RE.match(str(h)):
+                out[h] = e
+        return {"v": 1, "servers": out}
+
+    def mutate(self, fn):
+        """Read-modify-write with retry on a lost race; returns the stored document."""
+        with self.lock:
+            for _ in range(8):
+                raw, gen = self._read()
+                doc = self._norm(raw)
+                if fn(doc["servers"]) is False:
+                    return doc
+                try:
+                    self._write(doc, gen)
+                    self.err = ""
+                    return doc
+                except urllib.error.HTTPError as e:
+                    if e.code != 412:
+                        raise
+            raise RuntimeError("registry write kept losing the race")
+
+    def read(self):
+        with self.lock:
+            return self._norm(self._read()[0])["servers"]
+
+    # ---- own identity
+    def note_host(self, host):
+        h = (host or "").split(":")[0].strip().lower()
+        if not self.self_host and HOST_RE.match(h):
+            self.self_host = h
+            threading.Thread(target=self.heartbeat, kwargs={"force": True}, daemon=True).start()
+
+    def find_self(self):
+        if self.self_host:
+            return self.self_host
+        svc = os.environ.get("K_SERVICE")
+        if svc:
+            try:
+                num = metadata("project/numeric-project-id", timeout=2.0)
+                region = metadata("instance/region", timeout=2.0).rsplit("/", 1)[-1]
+                h = "%s-%s.%s.run.app" % (svc.lower(), num, region)
+                if HOST_RE.match(h):
+                    self.self_host = h
+            except Exception as e:
+                self.err = "cannot work out this service's URL: %s" % e
+        return self.self_host
+
+    def heartbeat(self, force=False):
+        host = self.find_self()
+        if not host:
+            return False
+        if not force and time.time() - self.beat_at < REG_BEAT:
+            return True
+        try:
+            eps, _ = load_endpoints()
+        except Exception:
+            eps = []
+        info = Where._from_host(host) or {}
+        now = int(time.time())
+        mine = {"host": host, "region": info.get("region", ""), "service": os.environ.get("K_SERVICE", ""),
+                "engine": ENGINE, "cred": cred_fingerprint(eps), "ts": now, "node": STORE.iid}
+
+        def put(sv):
+            old = sv.get(host) or {}
+            mine["first"] = old.get("first", now)
+            mine["manual"] = False
+            sv[host] = dict(old, **mine)
+        try:
+            self.mutate(put)
+            self.beat_at = time.time()
+            return True
+        except Exception as e:
+            self.err = explain_gcs_error(e)
+            log("registry heartbeat failed:", self.err)
+            return False
+
+    # ---- manual add / forget
+    def add(self, host):
+        host = (host or "").strip().lower().split("://")[-1].split("/")[0]
+        if not HOST_RE.match(host):
+            raise ValueError("That is not a Cloud Run host (expected name-123.region.run.app)")
+        res = check_peer(host)
+        if not res["up"]:
+            raise ValueError("%s did not answer as a Saeka panel (%s)" % (host, res["err"] or "no answer"))
+        info = Where._from_host(host) or {}
+
+        def put(sv):
+            if host not in sv:
+                sv[host] = {"host": host, "region": info.get("region", ""), "service": "", "engine": "",
+                            "cred": "", "ts": int(time.time()), "first": int(time.time()), "manual": True}
+        self.mutate(put)
+        self.checks.pop(host, None)
+
+    def forget(self, host):
+        host = (host or "").strip().lower()
+        if host == self.self_host:
+            raise ValueError("This is the server you are on; it cannot be removed")
+        def drop(sv):
+            if host not in sv:
+                return False
+            del sv[host]
+        self.mutate(drop)
+        self.checks.pop(host, None)
+
+    # ---- listing with live health checks
+    def _check(self, host):
+        c = self.checks.get(host)
+        if c and time.time() - c[0] < 15:
+            return c[1]
+        res = check_peer(host)
+        self.checks[host] = (time.time(), res)
+        return res
+
+    def listing(self):
+        self.heartbeat()
+        try:
+            sv = self.read()
+            err = ""
+        except Exception as e:
+            sv, err = {}, explain_gcs_error(e)
+        me = self.self_host
+        if me and me not in sv:
+            sv = dict(sv); sv[me] = {"host": me, "ts": int(time.time())}
+        hosts = list(sv)
+        peers = [h for h in hosts if h != me]
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            res = dict(zip(peers, ex.map(self._check, peers)))
+        eps, _ = load_endpoints()
+        mine_fp = cred_fingerprint(eps)
+        now = time.time()
+        out, dead = [], []
+        for h in hosts:
+            e = sv[h]
+            info = Where._from_host(h) or region_info(e.get("region", ""), "registry") or {}
+            r = {"up": True, "ms": 0, "err": ""} if h == me else res[h]
+            fp = e.get("cred", "")
+            if not r["up"] and now - e.get("ts", now) > REG_STALE and h != me:
+                dead.append(h)
+            out.append({"host": h, "self": h == me, "up": r["up"], "ms": r["ms"], "err": r["err"],
+                        "region": info.get("region", ""), "city": info.get("city", ""), "country": info.get("country", ""),
+                        "cc": info.get("cc", ""), "service": e.get("service", ""), "engine": e.get("engine", ""),
+                        "seen": int(e.get("ts", 0)), "manual": bool(e.get("manual")),
+                        "same_login": (not fp or not mine_fp or fp == mine_fp)})
+        if dead:
+            def drop(s):
+                for h in dead:
+                    s.pop(h, None)
+            try:
+                self.mutate(drop)
+            except Exception:
+                pass
+            out = [o for o in out if o["host"] not in dead]
+        out.sort(key=lambda o: (not o["self"], not o["up"], o["region"], o["host"]))
+        return {"self": me, "servers": out, "store": self.mode, "error": err or self.err}
+
+
+def check_peer(host, timeout=4.0):
+    """Health-check another panel. Only hosts that passed HOST_RE ever get here."""
+    t0 = time.time()
+    last = {"up": False, "ms": None, "err": "no answer"}
+    for base in (BASE, LEGACY_BASE):         # servers deployed before the move still answer on the old path
+        url = PEER_URL.format(host=host, base=base) + "/api/health"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "saeka-panel/registry"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                d = json.loads(r.read(4096).decode("utf-8", "replace"))
+            if isinstance(d, dict) and d.get("ok") is True and d.get("panel") == "saeka":
+                return {"up": True, "ms": int((time.time() - t0) * 1000), "err": ""}
+            last = {"up": False, "ms": None, "err": "not a Saeka panel"}
+        except urllib.error.HTTPError as e:
+            last = {"up": False, "ms": None, "err": "HTTP %d" % e.code}
+        except Exception as e:
+            last = {"up": False, "ms": None, "err": "no answer (%s)" % type(e).__name__}
+            break                              # host unreachable: the second path would fail the same way
+    return last
+
+
+REGISTRY = Registry(STORE)
+
+
+# --------------------------------------------------------------------------
 # auth
 # --------------------------------------------------------------------------
 PANEL_KEY = os.environ.get("PANEL_KEY", "").strip()
@@ -904,12 +1150,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route(self):
         p = urllib.parse.urlsplit(self.path).path
-        if p.startswith(BASE):
-            p = p[len(BASE):]
-        elif not (p == "/" or p.startswith("/api/")):
-            return None            # H2O strips the matched prefix before proxying; accept that form too
-        p = p.rstrip("/")
-        return p or "/"
+        if p == LEGACY_BASE or p.startswith(LEGACY_BASE + "/"):
+            p = p[len(LEGACY_BASE):] or "/"
+        p = p.rstrip("/") or "/"
+        if p in ("/", "/health") or p.startswith("/api/"):
+            return p
+        return None
 
     # ---- verbs
     def do_HEAD(self):
@@ -918,7 +1164,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         r = self._route()
         if r is None:
-            return self._json(404, {"ok": False})
+            return self._send(404, b"404 Not Found", "text/plain; charset=utf-8")
+        if r == "/health":
+            return self._send(200, b"OK", "text/plain; charset=utf-8")
         if r == "/":
             ae = self.headers.get("Accept-Encoding", "")
             if "gzip" in ae:
@@ -926,7 +1174,7 @@ class Handler(BaseHTTPRequestHandler):
                                   {"Content-Encoding": "gzip", "Vary": "Accept-Encoding", "Content-Security-Policy": CSP})
             return self._send(200, INDEX_RAW, "text/html; charset=utf-8", {"Content-Security-Policy": CSP})
         if r == "/api/health":
-            return self._json(200, {"ok": True, "up": int(time.time() - STARTED)})
+            return self._json(200, {"ok": True, "panel": "saeka", "up": int(time.time() - STARTED)})
         if r == "/api/public":
             REGISTRY.register(self._host(), WHERE.get(self._host())[0])
             return self._json(200, self._public())
@@ -941,6 +1189,16 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authed():
                 return self._json(401, {"ok": False, "error": "locked"})
             return self._json(200, self._full())
+        if r == "/api/servers":
+            if not self._authed():
+                return self._json(401, {"ok": False, "error": "locked"})
+            if not allow(("srv", self._ip()), 30, 60):
+                return self._json(429, {"ok": False})
+            REGISTRY.note_host(self._host())
+            try:
+                return self._json(200, dict(REGISTRY.listing(), ok=True))
+            except Exception as e:
+                return self._json(500, {"ok": False, "error": explain_gcs_error(e)})
         self._json(404, {"ok": False})
 
     def do_POST(self):
@@ -960,6 +1218,7 @@ class Handler(BaseHTTPRequestHandler):
             if not re.fullmatch(r"[a-f0-9]{12,32}", vid):
                 return self._json(400, {"ok": False})
             authed = self._authed()
+            REGISTRY.note_host(self._host())
             geo = GEO.lookup(ip, block=bool(body.get("nv")))
             STORE.pulse(vid, ip, bool(body.get("nv")), geo)
             REGISTRY.register(self._host(), WHERE.get(self._host())[0])
@@ -973,15 +1232,28 @@ class Handler(BaseHTTPRequestHandler):
             if hmac.compare_digest(hashlib.sha256(key.encode()).digest(),
                                    hashlib.sha256(PANEL_KEY.encode()).digest()):
                 secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "https") == "https" else ""
-                cookie = "sp_s=%s; HttpOnly; SameSite=Strict; Path=%s; Max-Age=%d%s" % (
-                    make_session(), BASE, SESSION_TTL, secure)
+                cookie = "sp_s=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d%s" % (
+                    make_session(), SESSION_TTL, secure)
                 return self._json(200, {"ok": True}, {"Set-Cookie": cookie})
             _fails.append(now)
             time.sleep(0.6)
             return self._json(401, {"ok": False, "error": "wrong key"})
+        if r in ("/api/servers/add", "/api/servers/forget"):
+            if not self._authed():
+                return self._json(401, {"ok": False, "error": "locked"})
+            if not allow(("srv", ip), 30, 60):
+                return self._json(429, {"ok": False})
+            REGISTRY.note_host(self._host())
+            try:
+                (REGISTRY.add if r.endswith("add") else REGISTRY.forget)(str(body.get("host", "")))
+            except ValueError as e:
+                return self._json(400, {"ok": False, "error": str(e)})
+            except Exception as e:
+                return self._json(500, {"ok": False, "error": explain_gcs_error(e)})
+            return self._json(200, dict(REGISTRY.listing(), ok=True))
         if r == "/api/logout":
             return self._json(200, {"ok": True}, {
-                "Set-Cookie": "sp_s=; HttpOnly; SameSite=Strict; Path=%s; Max-Age=0" % BASE})
+                "Set-Cookie": "sp_s=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"})
         self._json(404, {"ok": False})
 
     # ---- payloads
@@ -1047,6 +1319,25 @@ def warmup():
         load_endpoints()
     except Exception as e:
         log("warmup:", e)
+    beat(first=True)
+
+
+def beat(first=False):
+    """Register this service in the shared registry (creates it if nobody has yet)."""
+    try:
+        if REGISTRY.heartbeat(force=True):
+            if first:
+                log("registered in the server registry as %s (%s)" % (REGISTRY.self_host, REGISTRY.mode))
+        elif first:
+            log("registry: own URL not known yet - will register on the first panel visit")
+    except Exception as e:
+        log("registry:", e)
+
+
+def registry_loop():
+    while True:
+        time.sleep(REG_BEAT)
+        beat()
 
 
 def main():
@@ -1063,6 +1354,7 @@ def main():
     signal.signal(signal.SIGINT, stop)
     threading.Thread(target=flusher, daemon=True).start()
     threading.Thread(target=warmup, daemon=True).start()
+    threading.Thread(target=registry_loop, daemon=True).start()
     log("listening on %s:%d  engine=%s  store=%s  index=%d bytes" % (
         BIND, PORT, ENGINE, STORE.mode, len(INDEX_RAW)))
     srv.serve_forever(poll_interval=0.5)

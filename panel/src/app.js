@@ -26,6 +26,11 @@ function dur(s) {
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
   return d ? d + 'd ' + h + 'h' : h ? h + 'h ' + m + 'm' : m + 'm ' + Math.floor(s % 60) + 's';
 }
+const IC = {
+  copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="1"/><path d="M5 15V5a1 1 0 011-1h10"/></svg>',
+  qr: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h3v3M20 14v6h-3"/></svg>',
+  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>'
+};
 const SPIN = '<svg class="spin" viewBox="0 0 24 24" aria-hidden="true"><circle class="tr" cx="12" cy="12" r="9"/><circle class="ar" cx="12" cy="12" r="9"/></svg>';
 
 /* ------------------------------------------------------------------ flags */
@@ -75,7 +80,7 @@ async function copyWith(btn, text, what) {
   const ok = await copyText(text);
   toast(ok ? 'Copied ' + what : 'Copy blocked by the browser - select the text manually', !ok);
   if (ok && btn) {
-    const old = btn.innerHTML; btn.classList.add('done'); btn.textContent = 'Copied';
+    const old = btn.innerHTML; btn.classList.add('done'); btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M5 12l5 5 9-10"/></svg>Copied';
     setTimeout(() => { btn.classList.remove('done'); btn.innerHTML = old; }, 1300);
   }
 }
@@ -205,10 +210,10 @@ function renderStoreNote() {
   if (st.synced === false) {
     // store_error only arrives for the signed-in admin; it names what Cloud Storage refused.
     const why = LAST_STORE_ERR ? ' <code>' + esc(LAST_STORE_ERR) + '</code>' : '';
-    bits.push('<span class="warn"><b>Counter store unreachable</b> &mdash; numbers are kept on this node only until it reconnects.' + why + '</span>');
+    bits.push('<span class="warn"><b>Counter store unreachable</b>' + why + '</span>');
   }
-  else if (st.store === 'gcs') bits.push('Counter store: <b>shared Cloud Storage object</b> &mdash; totals survive restarts and every instance adds to the same number.');
-  else bits.push('Counter store: <b>this node only</b> &mdash; set PANEL_BUCKET at deploy time (deploy.sh does it) so totals survive restarts and scale-out.');
+  else if (st.store === 'gcs') bits.push('Counters shared via <b>Cloud Storage</b>.');
+  else bits.push('Counters kept on <b>this node only</b>.');
   $('#storeNote').innerHTML = bits.join(' ');
   $('#storeNote').classList.toggle('warn', st.synced === false);
 }
@@ -271,55 +276,98 @@ function setStatus(ok) {
 }
 
 /* ------------------------------------------------------------------ share links */
+/* Three separate values, never mixed up:
+     Address = where the client dials   (IP / hostname)
+     SNI     = name sent in the TLS hello
+     Host    = HTTP Host header = the *.run.app service that must answer       */
+const ADDR_PRE = { firebase: ['Firebase', 'firebase.google.com'], googleapis: ['Google APIs', 'www.googleapis.com'] };
+const SNI_PRE = { firebase: ['Firebase', 'firebase.google.com'], googleapis: ['Google APIs', 'www.googleapis.com'], maya: ['Maya', 'maya.ph'] };
+const HOST_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+function validHost(v) {
+  v = String(v || '');
+  if (!v || v.length > 253) return false;
+  if (HOST_RE.test(v)) return true;
+  const six = v.replace(/^\[|\]$/g, '');
+  return six.indexOf(':') > -1 && /^[0-9A-Fa-f:.]+$/.test(six);
+}
 function b64(s) { return btoa(unescape(encodeURIComponent(s))); }
 const PRE_ADDR = [['host', 'Server'], ['firebase', 'Firebase', 'firebase.google.com'], ['googleapis', 'GoogleAPIs', 'www.googleapis.com']];
 const PRE_SNI = [['host', 'Server'], ['firebase', 'Firebase', 'firebase.google.com'], ['googleapis', 'GoogleAPIs', 'www.googleapis.com'], ['maya', 'Maya', 'maya.ph']];
 const HOST_OK = /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 function defaults() {
-  return { host: location.hostname, am: 'host', addr: '', port: location.port || '443', sm: 'host', sni: '', fp: 'chrome' };
+  return { host: location.hostname, port: location.port || '443', fp: 'chrome', addrMode: 'host', addr: '', sniMode: 'host', sni: '', insecure: false };
 }
-/* Resolve what actually goes into a link. The Host header is always the real
-   server (Cloud Run routes on it); Address and SNI may be fronting hosts. */
+function loadOpts() {
+  const d = defaults();
+  try {
+    const n = JSON.parse(ls.get('sp_opts2') || 'null');
+    if (n && typeof n === 'object') return Object.assign(d, n);
+    const old = JSON.parse(ls.get('sp_opts') || 'null');           /* migrate the first version's settings */
+    if (old && typeof old === 'object') {
+      if (old.port) d.port = String(old.port);
+      if (old.fp) d.fp = old.fp;
+      if (old.addr && old.addr !== location.hostname && validHost(old.addr)) { d.addrMode = 'custom'; d.addr = old.addr; }
+      if (old.sni && old.sni !== location.hostname && validHost(old.sni)) { d.sniMode = 'custom'; d.sni = old.sni; }
+    }
+  } catch (e) { /* corrupt storage: start clean */ }
+  return d;
+}
+function saveOpts() { ls.set('sp_opts2', JSON.stringify(S.opts)); }
+/* resolve what the links will really contain - always complete and valid */
 function eff(o) {
-  const host = (o.host || location.hostname || '').trim();
-  const pick = (mode, custom, pre) => {
-    if (mode === 'host') return host;
-    const p = pre.find(x => x[0] === mode);
-    return p && p[2] ? p[2] : ((custom || '').trim() || host);
-  };
-  return { host: host, addr: pick(o.am, o.addr, PRE_ADDR), port: String(o.port || '443'), sni: pick(o.sm, o.sni, PRE_SNI), fp: o.fp || 'chrome', tag: o.tag };
+  const host = validHost(o.host) ? o.host : location.hostname;
+  const pick = (mode, pre, custom) => mode === 'host' ? host : pre[mode] ? pre[mode][1] : (validHost(custom) ? custom : host);
+  const port = /^\d+$/.test(String(o.port)) && +o.port > 0 && +o.port < 65536 ? String(o.port) : '443';
+  return { host, addr: pick(o.addrMode, ADDR_PRE, o.addr), sni: pick(o.sniMode, SNI_PRE, o.sni), port, fp: o.fp || 'chrome', insecure: !!o.insecure };
 }
-function tp(ep, o) {
-  const q = encodeURIComponent, p = [['security', 'tls'], ['sni', o.sni], ['fp', o.fp]];
-  if (ep.network === 'ws') p.push(['type', 'ws'], ['host', o.host], ['path', ep.path]);
-  else if (ep.network === 'httpupgrade') p.push(['type', 'httpupgrade'], ['host', o.host], ['path', ep.path]);
-  else if (ep.network === 'xhttp' || ep.network === 'splithttp') p.push(['type', 'xhttp'], ['host', o.host], ['path', ep.path], ['mode', ep.mode || 'auto']);
-  else if (ep.network === 'grpc') p.push(['type', 'grpc'], ['serviceName', ep.service], ['authority', o.host], ['mode', 'gun'], ['alpn', 'h2']);
+function tp(ep, e) {
+  const q = encodeURIComponent, p = [['security', 'tls'], ['sni', e.sni], ['fp', e.fp]];
+  if (e.insecure) p.push(['allowInsecure', '1']);
+  if (ep.network === 'ws') p.push(['type', 'ws'], ['host', e.host], ['path', ep.path]);
+  else if (ep.network === 'httpupgrade') p.push(['type', 'httpupgrade'], ['host', e.host], ['path', ep.path]);
+  else if (ep.network === 'xhttp' || ep.network === 'splithttp') p.push(['type', 'xhttp'], ['host', e.host], ['path', ep.path], ['mode', ep.mode || 'auto']);
+  else if (ep.network === 'grpc') p.push(['type', 'grpc'], ['serviceName', ep.service], ['authority', e.host], ['mode', 'gun'], ['alpn', 'h2']);
   return p.map(kv => kv[0] + '=' + q(kv[1])).join('&');
 }
-function uriFor(ep, raw) {
-  const o = eff(raw);
-  if (ep.family === 'ssh') {
-    const fronted = o.addr !== o.host || o.sni !== o.host || o.port !== '443';
-    return 'wss://' + o.host + ep.path + (fronted ? '#connect=' + o.addr + ':' + o.port + '&sni=' + o.sni : '');
-  }
-  const q = encodeURIComponent, host = o.addr.indexOf(':') > -1 && o.addr[0] !== '[' ? '[' + o.addr + ']' : o.addr;
-  const label = 'saeka-' + ep.family + '-' + ep.variant + '-' + (o.tag || (S.server && S.server.region) || 'srv');
-  const hp = host + ':' + o.port;
-  if (ep.family === 'vless') return 'vless://' + q(ep.cred.id) + '@' + hp + '?encryption=none&' + tp(ep, o) + '#' + q(label);
-  if (ep.family === 'trojan') return 'trojan://' + q(ep.cred.password) + '@' + hp + '?' + tp(ep, o) + '#' + q(label);
+function uriFor(ep, o) {
+  const e = eff(o);
+  if (ep.family === 'ssh') return 'wss://' + e.host + ep.path;
+  const q = encodeURIComponent, host = e.addr.indexOf(':') > -1 && e.addr[0] !== '[' ? '[' + e.addr + ']' : e.addr;
+  const label = 'saeka-' + ep.family + '-' + ep.variant + '-' + ((S.server && S.server.region) || 'srv');
+  const hp = host + ':' + e.port;
+  if (ep.family === 'vless') return 'vless://' + q(ep.cred.id) + '@' + hp + '?encryption=none&' + tp(ep, e) + '#' + q(label);
+  if (ep.family === 'trojan') return 'trojan://' + q(ep.cred.password) + '@' + hp + '?' + tp(ep, e) + '#' + q(label);
   if (ep.family === 'ss') {
     const ui = b64(ep.cred.method + ':' + ep.cred.password).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    return 'ss://' + ui + '@' + hp + '?' + tp(ep, o) + '#' + q(label);
+    return 'ss://' + ui + '@' + hp + '?' + tp(ep, e) + '#' + q(label);
   }
   if (ep.family === 'vmess') {
     const net = ep.network === 'splithttp' ? 'xhttp' : ep.network;
-    const j = { v: '2', ps: label, add: o.addr, port: String(o.port), id: ep.cred.id, aid: '0', scy: 'auto', net: net,
-      type: net === 'grpc' ? 'gun' : net === 'xhttp' ? (ep.mode || 'auto') : 'none', host: o.host,
-      path: net === 'grpc' ? ep.service : ep.path, tls: 'tls', sni: o.sni, fp: o.fp, alpn: net === 'grpc' ? 'h2' : '' };
+    const j = { v: '2', ps: label, add: e.addr, port: e.port, id: ep.cred.id, aid: '0', scy: 'auto', net: net,
+      type: net === 'grpc' ? 'gun' : net === 'xhttp' ? (ep.mode || 'auto') : 'none', host: e.host,
+      path: net === 'grpc' ? ep.service : ep.path, tls: 'tls', sni: e.sni, fp: e.fp, alpn: net === 'grpc' ? 'h2' : '' };
+    if (net === 'grpc') j.authority = e.host;
     return 'vmess://' + b64(JSON.stringify(j));
   }
   return '';
+}
+/* the same link as plain fields, for clients that want them typed in by hand */
+function infoFor(ep, o) {
+  const e = eff(o), net = (FAM[ep.family] || ep.family) + ' / ' + (VAR[ep.variant] || ep.variant);
+  const L = [['Protocol', net]];
+  if (ep.family === 'ssh') {
+    L.push(['URL', 'wss://' + e.host + ep.path], ['Host', e.host], ['Path', ep.path]);
+  } else {
+    L.push(['Address', e.addr], ['Port', e.port], ['Host', e.host], ['SNI', e.sni]);
+    L.push(ep.network === 'grpc' ? ['Service name', ep.service] : ['Path', ep.path]);
+    if (ep.family === 'vless' || ep.family === 'vmess') L.push(['UUID', ep.cred.id]);
+    else L.push(['Password', ep.cred.password]);
+    if (ep.family === 'ss') L.push(['Method', ep.cred.method]);
+    L.push(['TLS', 'tls'], ['Fingerprint', e.fp]);
+    if (e.insecure) L.push(['Allow insecure', 'yes']);
+    if (ep.mode && (ep.network === 'xhttp' || ep.network === 'splithttp')) L.push(['XHTTP mode', ep.mode]);
+  }
+  return L.map(r => r[0] + ': ' + r[1]).join('\n');
 }
 
 /* ------------------------------------------------------------------ QR */
@@ -409,13 +457,15 @@ function renderTickets() {
         '<p class="tk-p" title="' + esc(route) + '">' + esc(route) + '</p><p class="tk-u">' + esc(uri) + '</p>' +
         '<div class="tk-s ' + (e.up ? 'up' : 'down') + '" data-st>' + statusLine(e) + '</div>' +
         (e.note ? '<p class="tk-note">' + esc(e.note) + '</p>' : '') + '</div>' +
-        '<div class="tk-stub"><button class="btn pri" type="button" data-copy ' + (ok ? '' : 'disabled') + '>Copy</button>' +
-        (e.family === 'ssh' ? '' : '<button class="btn" type="button" data-qr ' + (ok ? '' : 'disabled') + '>QR</button>') + '</div></article>';
+        '<div class="tk-stub"><button class="btn pri" type="button" data-copy ' + (ok ? '' : 'disabled') + '>' + IC.copy + 'Copy</button>' +
+        (e.family === 'ssh' ? '' : '<button class="btn" type="button" data-qr ' + (ok ? '' : 'disabled') + '>' + IC.qr + 'QR</button>') +
+        '<button class="btn" type="button" data-info ' + (ok ? '' : 'disabled') + '>' + IC.info + 'Info</button></div></article>';
     }).join('');
     $$('.tk', box).forEach(el => {
       const e = S.eps.find(x => x.tag === el.dataset.tag), uri = uriFor(e, o), what = (FAM[e.family] || '') + ' ' + (VAR[e.variant] || '') + ' link';
-      const c = $('[data-copy]', el), q = $('[data-qr]', el);
+      const c = $('[data-copy]', el), q = $('[data-qr]', el), inf = $('[data-info]', el);
       if (c) c.onclick = () => copyWith(c, uri, what);
+      if (inf) inf.onclick = () => copyWith(inf, infoFor(e, o), (FAM[e.family] || '') + ' connection details');
       if (q) q.onclick = () => showQr(uri, (FAM[e.family] || '') + ' \u00B7 ' + (VAR[e.variant] || ''));
     });
   } else {
@@ -497,107 +547,124 @@ async function loadDetail() {
     const d = r.data, first = !S.eps.length;
     S.eps = d.endpoints || []; S.cfg = d.config; S.ssh = d.ssh_users || [];
     S.server = d.server; S.authed = true;
-    if (!S.opts) { try { S.opts = Object.assign(defaults(), JSON.parse(ls.get('sp_opts2') || '{}')); } catch (e) { S.opts = defaults(); } if (!HOST_OK.test(S.opts.host || '')) S.opts.host = location.hostname; syncInputs(); }
+    if (!S.opts) { S.opts = loadOpts(); syncInputs(); }
     setLocked(false); renderServer(S.server); renderCreds(); renderLiveLine(); renderFilters(); renderTickets(); renderBoard();
-    if (first) { document.dispatchEvent(new Event('unlocked')); setTimeout(testEdge, 900); }
+    if (first) { document.dispatchEvent(new Event('unlocked')); setTimeout(testEdge, 900); setTimeout(() => scanServers(true), 1500); }
   } catch (e) { /* the pulse loop reports connectivity; keep last data */ }
 }
-function saveOpts() { ls.set('sp_opts2', JSON.stringify(S.opts)); S.sig = ''; renderTickets(); }
-function presetChips(el, list, key, mkey) {
-  el.innerHTML = list.map(p => '<button type="button" class="chip" data-m="' + p[0] + '" aria-pressed="' + (S.opts[mkey] === p[0]) + '">' + esc(p[1]) + '</button>').join('');
-  $$('.chip', el).forEach(b => b.onclick = () => {
-    S.opts[mkey] = b.dataset.m; $('#' + (key === 'addr' ? 'fAddr' : 'fSni')).style.borderColor = ''; saveOpts(); syncInputs();
-  });
+function fillModes() {
+  const opt = (v, t) => '<option value="' + v + '">' + esc(t) + '</option>';
+  $('#fAddrMode').innerHTML = opt('host', 'Server host') + Object.keys(ADDR_PRE).map(k => opt(k, ADDR_PRE[k][0] + ' · ' + ADDR_PRE[k][1])).join('') + opt('custom', 'Custom…');
+  $('#fSniMode').innerHTML = opt('host', 'Server host') + Object.keys(SNI_PRE).map(k => opt(k, SNI_PRE[k][0] + ' · ' + SNI_PRE[k][1])).join('') + opt('custom', 'Custom…');
 }
+fillModes();
 function syncInputs() {
-  const o = S.opts, e = eff(o);
-  const set = (id, v) => { const el = $('#' + id); if (el !== document.activeElement) el.value = v; };
-  set('fAddr', e.addr); set('fPort', e.port); set('fSni', e.sni); set('fHost', e.host); $('#fFp').value = o.fp;
-  presetChips($('#pAddr'), PRE_ADDR, 'addr', 'am'); presetChips($('#pSni'), PRE_SNI, 'sni', 'sm');
-  $('#hostNote').textContent = e.host === location.hostname ? 'this server' : 'picked server';
+  const o = S.opts;
+  $('#fHost').value = o.host; $('#fPort').value = o.port; $('#fFp').value = o.fp;
+  $('#fAddrMode').value = o.addrMode; $('#fSniMode').value = o.sniMode;
+  $('#fAddr').value = o.addr; $('#fSni').value = o.sni; $('#fInsecure').checked = !!o.insecure;
+  $('#wAddr').hidden = o.addrMode !== 'custom'; $('#wSni').hidden = o.sniMode !== 'custom';
+  $$('.bar .inp').forEach(i => i.style.borderColor = '');
+  renderRoute();
 }
-function bindField(id, fn) {
-  $('#' + id).addEventListener('input', ev => {
-    const el = ev.target, v = el.value.trim();
-    const bad = !v || /[\s/?#@]/.test(v) || (id === 'fPort' && !(/^\d+$/.test(v) && +v > 0 && +v < 65536)) || (id !== 'fPort' && !HOST_OK.test(v));
-    el.style.borderColor = bad ? 'var(--verm)' : '';
-    if (bad) return;
-    fn(v); saveOpts(); syncInputs();
-  });
+function renderRoute() {
+  if (!S.opts) return;
+  const e = eff(S.opts);
+  $('#route').innerHTML = 'Dial <b>' + esc(e.addr) + ':' + esc(e.port) + '</b> &rarr; TLS SNI <b>' + esc(e.sni) + '</b> &rarr; HTTP Host <b>' + esc(e.host) + '</b>' + (e.insecure ? ' &middot; <span class="warnt">certificate check off</span>' : '');
 }
-bindField('fAddr', v => { const p = PRE_ADDR.find(x => x[2] === v); S.opts.am = p ? p[0] : (v === S.opts.host ? 'host' : 'custom'); S.opts.addr = v; });
-bindField('fSni', v => { const p = PRE_SNI.find(x => x[2] === v); S.opts.sm = p ? p[0] : (v === S.opts.host ? 'host' : 'custom'); S.opts.sni = v; });
-bindField('fPort', v => { S.opts.port = v; });
-bindField('fHost', v => { S.opts.host = v; });
-$('#fFp').addEventListener('change', e => { S.opts.fp = e.target.value; saveOpts(); });
-$('#fReset').addEventListener('click', () => { S.opts = defaults(); ls.set('sp_opts2', '{}'); syncInputs(); $$('.bar .inp').forEach(i => i.style.borderColor = ''); S.sig = ''; renderTickets(); toast('Reset to this server'); });
-
-/* ---- find servers: everything deployed with this panel in the project */
-let SRV = [];
-function srvRow(r) {
-  const cur = r.host === S.opts.host;
-  return '<div class="srv' + (r.alive ? '' : ' off') + (cur ? ' sel' : '') + '" data-h="' + esc(r.host) + '">' +
-    '<div class="srv-f">' + flagHTML(r.cc) + '</div>' +
-    '<div class="srv-m"><b>' + esc(r.service || r.host.split('-')[0]) + (r.current ? ' <em>this panel</em>' : '') + '</b>' +
-    '<code title="' + esc(r.host) + '">' + esc(r.host) + '</code>' +
-    '<small>' + esc([r.city, r.country].filter(Boolean).join(', ') || r.region || 'unknown region') + '</small></div>' +
-    '<div class="srv-s"><span class="pill ' + (r.alive ? 'up' : 'down') + '"><span class="dot"></span>' + (r.alive ? 'online' : 'no answer') + '</span>' +
-    '<button type="button" class="btn ' + (cur ? 'done' : 'pri') + '" data-use ' + (r.alive || cur ? '' : 'disabled') + '>' + (cur ? 'In use' : 'Use') + '</button></div></div>';
-}
-function renderSrv() {
-  const box = $('#srvList');
-  if (!SRV.length) { box.innerHTML = '<p class="note">No servers registered yet. A deploy registers itself the first time its panel is opened.</p>'; }
-  else {
-    box.innerHTML = SRV.map(srvRow).join('');
-    $$('.srv', box).forEach(el => {
-      const r = SRV.find(x => x.host === el.dataset.h);
-      $('[data-use]', el).onclick = () => useServer(r);
-    });
-  }
-  const online = SRV.filter(r => r.alive).length;
-  $('#srvCopyAll').disabled = !online || !S.eps.length;
-  $('#dlgSrvT').textContent = SRV.length > 1 ? 'Found ' + SRV.length + ' servers' : SRV.length ? 'Found 1 server' : 'Find servers';
-}
-function useServer(r) {
-  S.opts.host = r.host;
-  S.opts.tag = r.region || '';
-  saveOpts(); syncInputs(); renderSrv();
-  if (r.lat != null) { try { Globe.focus(r.lon, r.lat); } catch (e) { /* globe optional */ } }
-  toast('Links now use ' + r.host);
-}
-async function findServers() {
-  if (!S.authed) { toast('Unlock the panel to list servers', true); openLogin(); return; }
-  const dlg = $('#dlgSrv'); if (!dlg.open) dlg.showModal();
-  const btn = $('#srvRefresh'); btn.disabled = true; $('#srvErr').textContent = '';
-  $('#srvList').innerHTML = '<p class="note">' + SPIN + ' scanning this project&hellip;</p>';
-  try {
-    const r = await api('/api/servers', null, 15000);
-    if (r.status === 401) { dlg.close(); setLocked(true); toast('Session expired - unlock again', true); openLogin(); return; }
-    if (!r.ok || !r.data || !r.data.ok) throw new Error('http ' + r.status);
-    SRV = r.data.servers || [];
-    const cur = SRV.find(x => x.current);
-    if (cur && S.opts.host === location.hostname) S.opts.host = cur.host;
-    renderSrv();
-    if (r.data.store !== 'gcs') $('#srvErr').textContent = 'Shared storage is off for this deploy, so only this server is known. Redeploy with deploy.sh to enable discovery.';
-    else if (r.data.error) $('#srvErr').textContent = 'Registry storage problem: ' + r.data.error;
-  } catch (e) {
-    $('#srvList').innerHTML = '<p class="note">Could not scan servers. Check the connection and try again.</p>';
-  } finally { btn.disabled = false; }
-}
-$('#findSrv').addEventListener('click', findServers);
-$('#recenter').addEventListener('click', () => { if (S.authed) findServers(); });
-$('#srvRefresh').addEventListener('click', findServers);
-$('#srvCopyAll').addEventListener('click', e => {
-  const live = SRV.filter(r => r.alive), list = shown().filter(x => x.supported !== false);
-  if (!live.length || !list.length) return toast('Nothing to copy with this filter', true);
-  const out = [];
-  live.forEach(r => list.forEach(ep => out.push(uriFor(ep, Object.assign({}, S.opts, { host: r.host, tag: r.region || 'srv' })))));
-  copyWith(e.currentTarget, out.join('\n'), out.length + ' links from ' + live.length + ' servers');
+function optsChanged() { saveOpts(); S.sig = ''; renderRoute(); renderTickets(); }
+const TEXT_FIELDS = { fHost: 'host', fPort: 'port', fAddr: 'addr', fSni: 'sni' };
+Object.keys(TEXT_FIELDS).forEach(id => $('#' + id).addEventListener('input', ev => {
+  const el = ev.target, v = el.value.trim(), key = TEXT_FIELDS[id];
+  const bad = key === 'port' ? !(/^\d+$/.test(v) && +v > 0 && +v < 65536) : !validHost(v);
+  el.style.borderColor = bad ? 'var(--verm)' : '';
+  if (bad) return;
+  S.opts[key] = v; optsChanged();
+}));
+$('#fFp').addEventListener('change', ev => { S.opts.fp = ev.target.value; optsChanged(); });
+$('#fAddrMode').addEventListener('change', ev => {
+  S.opts.addrMode = ev.target.value; $('#wAddr').hidden = S.opts.addrMode !== 'custom';
+  if (S.opts.addrMode === 'custom') $('#fAddr').focus();
+  optsChanged();
 });
-$('#copyAll').addEventListener('click', e => {
+$('#fSniMode').addEventListener('change', ev => {
+  const m = S.opts.sniMode = ev.target.value; $('#wSni').hidden = m !== 'custom';
+  if (m === 'maya') { S.opts.insecure = true; $('#fInsecure').checked = true; toast('Certificate check turned off: the Maya name will not match the server certificate'); }
+  else if (m !== 'custom') { S.opts.insecure = false; $('#fInsecure').checked = false; }
+  if (m === 'custom') $('#fSni').focus();
+  optsChanged();
+});
+$('#fInsecure').addEventListener('change', ev => { S.opts.insecure = ev.target.checked; optsChanged(); });
+$('#fReset').addEventListener('click', () => { S.opts = defaults(); ls.set('sp_opts2', ''); ls.set('sp_opts', ''); syncInputs(); S.sig = ''; renderTickets(); toast('Reset to this server'); });
+$('#copyAll').addEventListener('click', ev => {
   const list = shown().filter(x => x.supported !== false);
   if (!list.length) return toast('Nothing to copy with this filter', true);
-  copyWith(e.currentTarget, list.map(x => uriFor(x, S.opts)).join('\n'), list.length + ' links');
+  copyWith(ev.currentTarget, list.map(x => uriFor(x, S.opts)).join('\n'), list.length + ' links');
+});
+
+/* ------------------------------------------------------------------ find server */
+const dlgSrv = $('#dlgSrv');
+S.srv = { list: [], busy: false };
+function setSrvCount(n) { const em = $('#srvCount'); em.hidden = !n; em.textContent = n || ''; }
+function renderServers(d, err) {
+  const ul = $('#srvList');
+  if (d) { S.srv.list = d.servers || []; S.srv.store = d.store; S.srv.reg = d.error; }
+  const list = S.srv.list, cur = S.opts ? eff(S.opts).host : location.hostname;
+  setSrvCount(list.filter(x => x.up).length);
+  const up = list.filter(x => x.up).length;
+  $('#srvLead').textContent = !list.length ? 'No servers found yet.' :
+    up + ' of ' + list.length + ' server' + (list.length === 1 ? '' : 's') + ' answering. Pick one to point every link at it' + (S.srv.store === 'gcs' ? '.' : ' (single-server registry: no shared bucket).');
+  ul.innerHTML = list.map(x => {
+    const st = x.up ? '<span class="pill up"><span class="dot"></span>' + (x.self ? 'online' : x.ms + ' ms') + '</span>' : '<span class="pill down"><span class="dot"></span>' + esc(x.err || 'down') + '</span>';
+    const tags = (x.self ? '<span class="tag">this server</span>' : '') + (x.same_login ? '' : '<span class="tag bad">different login</span>') + (x.manual ? '<span class="tag">added</span>' : '');
+    const inUse = x.host === cur;
+    return '<li class="sv' + (x.up ? '' : ' off') + (inUse ? ' cur' : '') + '" data-host="' + esc(x.host) + '"><span class="sv-f">' + flagHTML(x.cc) + '</span>' +
+      '<div class="sv-m"><b>' + esc((x.region || 'unknown').toUpperCase()) + '</b><small>' + esc(x.city ? x.city + (x.country ? ', ' + x.country : '') : x.service || '') + '</small><code title="' + esc(x.host) + '">' + esc(x.host) + '</code></div>' +
+      '<div class="sv-s">' + st + tags + '</div>' +
+      '<div class="sv-a"><button class="btn pri" type="button" data-use ' + (inUse || !x.up ? 'disabled' : '') + '>' + (inUse ? 'In use' : 'Use') + '</button>' +
+      '<a class="btn" href="https://' + esc(x.host) + '/" target="_blank" rel="noopener noreferrer">Open</a>' +
+      (x.self ? '' : '<button class="btn ico" type="button" data-del aria-label="Remove ' + esc(x.host) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 7h14M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>') + '</div></li>';
+  }).join('');
+  $$('.sv', ul).forEach(li => {
+    const h = li.dataset.host, u = $('[data-use]', li), x = $('[data-del]', li);
+    if (u) u.onclick = () => { S.opts.host = h; $('#fHost').value = h; $('#fHost').style.borderColor = ''; optsChanged(); renderServers(); toast('Links now point at ' + h); };
+    if (x) x.onclick = () => srvCall('/api/servers/forget', { host: h }, x);
+  });
+  $('#srvErr').textContent = err || (S.srv.reg ? 'Registry: ' + S.srv.reg : '');
+}
+async function scanServers(quiet) {
+  if (S.srv.busy) return; S.srv.busy = true;
+  const b = $('#srvScan'); if (!quiet) { b.disabled = true; b.innerHTML = SPIN + ' Scanning'; $('#srvLead').innerHTML = SPIN + ' Checking every server…'; }
+  try {
+    const r = await api('/api/servers', null, 20000);
+    if (r.status === 401) { S.authed = false; setLocked(true); if (!quiet) { dlgSrv.close(); toast('Session ended - unlock again', true); } }
+    else if (r.ok && r.data) renderServers(r.data);
+    else if (!quiet) renderServers(null, (r.data && r.data.error) || 'Could not scan (HTTP ' + r.status + ')');
+  } catch (e) { if (!quiet) renderServers(null, 'Could not reach the panel. Check your connection.'); }
+  b.disabled = false; b.textContent = 'Scan again'; S.srv.busy = false;
+}
+async function srvCall(path, body, btn) {
+  $('#srvErr').textContent = ''; if (btn) btn.disabled = true;
+  try {
+    const r = await api(path, body, 20000);
+    if (r.ok && r.data) { renderServers(r.data); return true; }
+    $('#srvErr').textContent = (r.data && r.data.error) || 'Request failed (HTTP ' + r.status + ')';
+  } catch (e) { $('#srvErr').textContent = 'Could not reach the panel.'; }
+  if (btn) btn.disabled = false; return false;
+}
+function openFind() {
+  if (!S.authed) { toast('Unlock the panel first'); openLogin(); return; }
+  dlgSrv.showModal(); renderServers(); scanServers();
+}
+$('#findServer').addEventListener('click', openFind);
+$('#fFind').addEventListener('click', openFind);
+$('#srvScan').addEventListener('click', () => scanServers());
+$('#srvAdd').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const el = $('#srvHost'), v = el.value.trim(); if (!v) return;
+  const btn = $('button', ev.target); btn.disabled = true; btn.innerHTML = SPIN;
+  if (await srvCall('/api/servers/add', { host: v })) { el.value = ''; toast('Server added'); }
+  btn.disabled = false; btn.textContent = 'Add';
 });
 $('#testAll').addEventListener('click', testEdge);
 
