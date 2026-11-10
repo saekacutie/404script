@@ -123,6 +123,10 @@ def wait_ready(project_id: str, zone: str, name: str, timeout: int = 900) -> dic
                 data = json.loads(result.stdout.strip())
                 if data.get("status") == "ready":
                     return data
+                if data.get("status") == "failed":
+                    print()
+                    log = ssh(project_id, zone, name, "sudo tail -n 25 /var/log/vm-setup.log").stdout
+                    die(f"VM setup failed at script line {data.get('line')}. Last log lines:\n{log}")
             except json.JSONDecodeError:
                 pass
         print("\r  Waiting for VM startup configuration...", end="", flush=True)
@@ -168,6 +172,8 @@ def cloudflare(domain: str, subdomain: str, ip: str, token: str) -> str | None:
 STARTUP = r'''#!/bin/bash
 set -euo pipefail
 exec > /var/log/vm-setup.log 2>&1
+# Any unexpected failure writes a marker, so the deploy script stops waiting and shows the log.
+trap 'printf "{\"status\":\"failed\",\"line\":\"%s\"}" "$LINENO" > /etc/vm-setup-complete.json' ERR
 export DEBIAN_FRONTEND=noninteractive
 
 echo "=== Starting VM provisioning ==="
@@ -193,7 +199,11 @@ REALITY_JSON='{"enabled":false}'; OVPN_JSON='{"enabled":false}'; SSH_JSON='{"ena
 
 if [ "$REALITY" = true ]; then
   echo "=== Installing Xray + VLESS+REALITY ==="
-  curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s -- install
+  for _try in 1 2 3; do
+    curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s -- install && break
+    echo "Xray install attempt $_try failed; retrying"; sleep 5
+  done
+  [ -x /usr/local/bin/xray ] || { echo "Xray binary missing after install"; exit 1; }
 
   UUID=$(cat /proc/sys/kernel/random/uuid)
   KEYS=$(/usr/local/bin/xray x25519)
@@ -203,7 +213,8 @@ if [ "$REALITY" = true ]; then
   PRIVATE=$(printf '%s\n' "$KEYS" | awk -F': *' 'tolower($1) ~ /private.*key/ {print $NF; exit}')
   PUBLIC=$(printf '%s\n' "$KEYS" | awk -F': *' 'tolower($1) ~ /(public.*key)|password/ {print $NF; exit}')
   if [ -z "$PRIVATE" ] || [ -z "$PUBLIC" ]; then
-    echo "WARNING: could not parse x25519 keys from: $KEYS"
+    echo "could not parse x25519 keys from: $KEYS"
+    exit 1
   fi
   SID=$(openssl rand -hex 8)
 
@@ -241,11 +252,20 @@ if [ "$REALITY" = true ]; then
       outbounds: [{protocol: "freedom"}]
     }' > /usr/local/etc/xray/config.json
 
-  # Symlink so all expected paths get the same clean config
+  # Symlink so all expected paths get the same clean config (/etc/xray does not
+  # exist on a fresh image; without mkdir this ln killed the whole script).
+  mkdir -p /etc/xray
   ln -sf /usr/local/etc/xray/config.json /etc/xray/config.json
+  chmod 644 /usr/local/etc/xray/config.json
 
-  systemctl enable --now xray
-  sleep 2
+  REALITY_ERR=""
+  if ! XRAY_TEST=$(/usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json 2>&1); then
+    REALITY_ERR="config test failed: $(printf '%s' "$XRAY_TEST" | tail -n 3 | tr '\n' ' ')"
+  else
+    systemctl enable xray >/dev/null 2>&1 || true
+    systemctl restart xray || true
+    sleep 3
+  fi
 
   if systemctl is-active --quiet xray; then
     echo "Xray+REALITY started successfully"
@@ -260,6 +280,8 @@ if [ "$REALITY" = true ]; then
   else
     echo "WARNING: Xray service failed to start"
     systemctl status xray --no-pager || true
+    [ -n "$REALITY_ERR" ] || REALITY_ERR="xray did not start: $(journalctl -u xray -n 5 --no-pager 2>/dev/null | tail -n 3 | tr '\n' ' ')"
+    REALITY_JSON=$(jq -n --arg e "$REALITY_ERR" '{enabled:false,error:$e}')
   fi
 fi
 
@@ -443,6 +465,11 @@ def main() -> None:
     if result.get("reality", {}).get("enabled"):
         r = result["reality"]
         print(f"REALITY: vless://{r['uuid']}@{host}:{r['port']}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={r['serverName']}&fp=chrome&pbk={r['publicKey']}&sid={r['shortId']}&type=tcp#saeka-reality")
+
+    elif reality:
+        err = result.get("reality", {}).get("error", "unknown error")
+        print(colour(f"REALITY did not start: {err}", RED))
+        print(f"  Inspect: gcloud compute ssh {name} --zone {zone} --tunnel-through-iap --command 'sudo journalctl -u xray -n 30 --no-pager'")
 
     if ovpn and scp(project_id, zone, name, "/root/client1.ovpn", WORKDIR / f"{name}-client1.ovpn"):
         (WORKDIR / f"{name}-client1.ovpn").chmod(0o600)
