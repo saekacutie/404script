@@ -392,8 +392,9 @@ echo -e "  ${YELLOW}5) Traefik    - full protocol support incl. gRPC (recommende
 echo -e "  ${YELLOW}6) OpenResty  - WS/HTTPUpgrade/XHTTP/SSH-WS only, NO gRPC/H2 (nginx limitation)${RESET}"
 echo -e "  ${YELLOW}7) SSH        - standalone SSH-over-WS (+ UDPGW), not the VLESS/etc stack${RESET}"
 echo -e "  ${YELLOW}8) OVPN       - standalone WS relay to a REAL OpenVPN server on a VM${RESET}"
+echo -e "  ${YELLOW}9) REALITY    - Cloud Run first, then your VM IP (REALITY/OpenVPN on the VM) + SSH-WS${RESET}"
 echo ""
-read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-8] (Default 1): ${RESET}")" ENGINE_CHOICE
+read -r -p "$(echo -e "  ${CYAN}SELECT PROXY ENGINE [1-9] (Default 1): ${RESET}")" ENGINE_CHOICE
 
 STANDALONE=0
 case "$ENGINE_CHOICE" in
@@ -404,6 +405,7 @@ case "$ENGINE_CHOICE" in
     6) ENGINE="OpenResty";  PROXY_ENV="openresty";;
     7) ENGINE="SSH Gateway"; PROXY_ENV="ssh";        STANDALONE=1;;
     8) ENGINE="OVPN Relay";  PROXY_ENV="ovpn-relay"; STANDALONE=1;;
+    9) ENGINE="REALITY Combo"; PROXY_ENV="reality";  STANDALONE=1;;
     *) ENGINE="HAProxy";    PROXY_ENV="haproxy";;
 esac
 DOCKERFILE="proxies/${PROXY_ENV}/Dockerfile"
@@ -739,6 +741,38 @@ elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     fi
     echo ""
     ENV_VARS="^@^OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
+elif [ "$PROXY_ENV" == "reality" ]; then
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${GREEN}        REALITY COMBO - CLOUD RUN + VM IP${RESET}"
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${YELLOW}Traffic enters Cloud Run first, then this service relays it to the${RESET}"
+    echo -e "  ${YELLOW}VM's static IP (REALITY / OpenVPN run there - see deploy_vm.py).${RESET}"
+    echo -e "  ${YELLOW}Deploy the VM FIRST and have its IP ready.${RESET}"
+    echo ""
+    read -r -p "$(echo -e "  ${CYAN}VM static IP or hostname: ${RESET}")" TCP_HOST
+    TCP_HOST=$(printf '%s' "$TCP_HOST" | tr -cd 'A-Za-z0-9.-')
+    read -r -p "$(echo -e "  ${CYAN}REALITY port on the VM [443]: ${RESET}")" TCP_PORT
+    TCP_PORT=$(printf '%s' "${TCP_PORT:-443}" | tr -cd '0-9')
+    [ -n "$TCP_PORT" ] || TCP_PORT=443
+    read -r -p "$(echo -e "  ${CYAN}OpenVPN port on the same VM (blank = skip): ${RESET}")" OVPN_PORT
+    OVPN_PORT=$(printf '%s' "$OVPN_PORT" | tr -cd '0-9')
+    read -r -p "$(echo -e "  ${CYAN}SSH username [saeka]: ${RESET}")" SSH_UNAME
+    SSH_UNAME=$(printf '%s' "${SSH_UNAME:-saeka}" | tr -dc 'a-z0-9_-')
+    read -r -p "$(echo -e "  ${CYAN}SSH password (blank = auto-generate): ${RESET}")" SSH_PW
+    if [ -z "$SSH_PW" ]; then
+        SSH_PW=$(< /dev/urandom tr -dc 'A-Za-z0-9' | head -c16 || true)
+        echo -e "  ${GREEN}Generated password for ${SSH_UNAME}: ${SSH_PW}${RESET}"
+        echo -e "  ${YELLOW}(shown once - write it down now)${RESET}"
+    fi
+    SSH_PW=$(printf '%s' "$SSH_PW" | tr -d '@,:')
+    if [ -z "$TCP_HOST" ]; then
+        echo -e "  ${RED}No VM address - the relay starts but /saeka-tcp will not connect.${RESET}"
+    fi
+    echo ""
+    ENV_VARS="^@^SSH_USERS=${SSH_UNAME}:${SSH_PW}@TCP_UPSTREAM_HOST=${TCP_HOST}@TCP_UPSTREAM_PORT=${TCP_PORT}"
+    if [ -n "$OVPN_PORT" ] && [ -n "$TCP_HOST" ]; then
+        ENV_VARS="${ENV_VARS}@OVPN_UPSTREAM_HOST=${TCP_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
+    fi
 else
     # ------------------------------------------------------------------
     # SAEKA PANEL (served at the service root by every Xray engine above).
@@ -1000,6 +1034,15 @@ elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     echo -e "  ${YELLOW}(deploy_vm.py). This service does not run OpenVPN itself.${RESET}"
     echo -e "  ${CYAN}Point your client-side WS wrapper at:${RESET}"
     echo -e "  ${CYAN}  wss://${CLEAN_HOST}/saeka-ovpn${RESET}"
+elif [ "$PROXY_ENV" == "reality" ]; then
+    echo -e "  ${CYAN}                  REALITY COMBO${RESET}"
+    echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
+    echo -e "  ${GREEN}Path: /saeka-tcp${RESET}   -> ${TCP_HOST:-<no VM>}:${TCP_PORT}  (REALITY on the VM)"
+    [ -z "${OVPN_PORT:-}" ] || echo -e "  ${GREEN}Path: /saeka-ovpn${RESET}  -> ${TCP_HOST}:${OVPN_PORT}  (OpenVPN on the VM)"
+    echo -e "  ${GREEN}Path: /saeka-ssh${RESET}   -> SSH on Cloud Run (user ${SSH_UNAME})"
+    echo -e "  ${CYAN}Entry:  wss://${CLEAN_HOST}/saeka-tcp   (Cloud Run first, then the VM IP)${RESET}"
+    echo -e "  ${YELLOW}Use the vless:// REALITY link printed by deploy_vm.py; point your${RESET}"
+    echo -e "  ${YELLOW}client's WS wrapper at the wss:// entry above, same as the OVPN relay.${RESET}"
 else
     echo -e "  ${CYAN}                    PATHS & PROTOCOLS${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"

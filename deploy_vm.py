@@ -479,6 +479,13 @@ def main() -> None:
         print(f"SSH SOCKS: ssh -i {key_path} -D 1080 -N tunnel@{host}")
 
     print(colour("\nCloud Run remains the HTTP endpoint; use the VM host for TCP/UDP protocols.", YELLOW))
+    run_url = ask("Cloud Run URL of your REALITY Combo service (deploy.sh option 9, blank to skip)", "")
+    run_host = run_url.replace("https://", "").replace("http://", "").strip("/ ")
+    if run_host:
+        print(colour(f"\nCombo: wss://{run_host}/saeka-tcp  ->  Cloud Run first, then {host}:{rport if reality else '-'}", GREEN))
+        if ovpn:
+            print(colour(f"       wss://{run_host}/saeka-ovpn ->  {host}:{oport}", GREEN))
+        print("If you haven't deployed it yet: run deploy.sh, choose 9, and give it this VM address.")
 
 if __name__ == "__main__":
     try:
