@@ -144,7 +144,8 @@ const S = {
 })();
 
 const SRC = { metadata: 'Google metadata server', hostname: 'run.app hostname', geoip: 'GeoIP of egress IP', env: 'PANEL_REGION setting', none: 'not detected' };
-const FAM = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', ss: 'Shadowsocks', ssh: 'SSH' };
+const FAM = { vless: 'VLESS', vmess: 'VMess', trojan: 'Trojan', ss: 'Shadowsocks', ssh: 'SSH', ovpn: 'OpenVPN', tcp: 'TCP' };
+const WSONLY = { ssh: 1, ovpn: 1, tcp: 1 };      /* wss://host/path tunnels: no share-link scheme, no QR */
 const VAR = { ws: 'WS', hu: 'HTTPUpgrade', xh: 'XHTTP', grpc: 'gRPC', h2: 'H2' };
 
 /* ------------------------------------------------------------------ server block */
@@ -328,7 +329,7 @@ function tp(ep, e) {
 }
 function uriFor(ep, o) {
   const e = eff(o);
-  if (ep.family === 'ssh') return 'wss://' + e.host + ep.path;
+  if (WSONLY[ep.family]) return 'wss://' + e.host + ep.path;
   const q = encodeURIComponent, host = e.addr.indexOf(':') > -1 && e.addr[0] !== '[' ? '[' + e.addr + ']' : e.addr;
   const label = 'saeka-' + ep.family + '-' + ep.variant + '-' + ((S.server && S.server.region) || 'srv');
   const hp = host + ':' + e.port;
@@ -352,7 +353,7 @@ function uriFor(ep, o) {
 function infoFor(ep, o) {
   const e = eff(o), net = (FAM[ep.family] || ep.family) + ' / ' + (VAR[ep.variant] || ep.variant);
   const L = [['Protocol', net]];
-  if (ep.family === 'ssh') {
+  if (WSONLY[ep.family]) {
     L.push(['URL', 'wss://' + e.host + ep.path], ['Host', e.host], ['Path', ep.path]);
   } else {
     L.push(['Address', e.addr], ['Port', e.port], ['Host', e.host], ['SNI', e.sni]);
@@ -416,7 +417,7 @@ function renderCreds() {
 function renderLiveLine() {
   const c = S.cfg; if (!c) return;
   const t = c.mtime ? ago(Date.now() / 1000 - c.mtime) : 'unknown';
-  $('#liveLine').innerHTML = '<span>config <b>' + esc(c.path.split('/').pop()) + '</b> modified ' + t + '</span><span><b>' + c.count + '</b> inbounds</span><span><b>' + c.up + '</b> listening</span>' +
+  $('#liveLine').innerHTML = (c.standalone ? '<span>engine <b>' + esc(((S.server && S.server.engine) || 'standalone')) + '</b></span>' : '<span>config <b>' + esc(c.path.split('/').pop()) + '</b> modified ' + t + '</span>') + '<span><b>' + c.count + '</b> inbounds</span><span><b>' + c.up + '</b> listening</span>' +
     (c.error ? '<span style="color:var(--verm)">' + esc(c.error) + '</span>' : '');
 }
 function chips(el, items, cur, onPick) {
@@ -424,13 +425,13 @@ function chips(el, items, cur, onPick) {
   $$('.chip', el).forEach(b => b.onclick = () => onPick(b.dataset.k));
 }
 function renderFilters() {
-  const fams = ['vless', 'vmess', 'trojan', 'ss', 'ssh'].filter(f => S.eps.some(e => e.family === f));
+  const fams = ['vless', 'vmess', 'trojan', 'ss', 'ssh', 'ovpn', 'tcp'].filter(f => S.eps.some(e => e.family === f));
   const vars = ['ws', 'hu', 'xh', 'grpc', 'h2'].filter(v => S.eps.some(e => e.variant === v));
   chips($('#fFam'), [['all', 'All']].concat(fams.map(f => [f, FAM[f]])), S.fam, k => { S.fam = k; S.sig = ''; renderTickets(); renderFilters(); });
   chips($('#fVar'), [['all', 'All']].concat(vars.map(v => [v, VAR[v]])), S.vr, k => { S.vr = k; S.sig = ''; renderTickets(); renderFilters(); });
 }
 function shown() {
-  return S.eps.filter(e => (S.fam === 'all' || e.family === S.fam) && (S.vr === 'all' || e.variant === S.vr || (e.family === 'ssh' && S.vr === 'ws')));
+  return S.eps.filter(e => (S.fam === 'all' || e.family === S.fam) && (S.vr === 'all' || e.variant === S.vr || (WSONLY[e.family] && S.vr === 'ws')));
 }
 function statusLine(e) {
   const t = S.edge[e.tag];
@@ -448,14 +449,14 @@ function renderTickets() {
     if (!list.length) { box.innerHTML = '<p class="note">Nothing matches this filter.</p>'; return; }
     box.innerHTML = list.map((e, i) => {
       const uri = uriFor(e, o), ok = e.supported !== false;
-      const route = e.family === 'ssh' ? e.path : e.network === 'grpc' ? 'service: ' + e.service : e.path;
+      const route = WSONLY[e.family] ? e.path : e.network === 'grpc' ? 'service: ' + e.service : e.path;
       return '<article class="tk' + (ok ? '' : ' off') + '" data-f="' + e.family + '" data-tag="' + esc(e.tag) + '" style="animation:tkin .6s var(--ease) backwards;animation-delay:' + Math.min(i, 12) * 45 + 'ms">' +
         '<div class="tk-main"><div class="tk-h"><b>' + esc(FAM[e.family] || e.family) + '</b><span>' + esc(VAR[e.variant] || e.variant) + '</span></div>' +
         '<p class="tk-p" title="' + esc(route) + '">' + esc(route) + '</p><p class="tk-u">' + esc(uri) + '</p>' +
         '<div class="tk-s ' + (e.up ? 'up' : 'down') + '" data-st>' + statusLine(e) + '</div>' +
         (e.note ? '<p class="tk-note">' + esc(e.note) + '</p>' : '') + '</div>' +
         '<div class="tk-stub"><button class="btn pri" type="button" data-copy ' + (ok ? '' : 'disabled') + '>' + IC.copy + 'Copy</button>' +
-        (e.family === 'ssh' ? '' : '<button class="btn" type="button" data-qr ' + (ok ? '' : 'disabled') + '>' + IC.qr + 'QR</button>') +
+        (WSONLY[e.family] ? '' : '<button class="btn" type="button" data-qr ' + (ok ? '' : 'disabled') + '>' + IC.qr + 'QR</button>') +
         '<button class="btn" type="button" data-info ' + (ok ? '' : 'disabled') + '>' + IC.info + 'Info</button></div></article>';
     }).join('');
     $$('.tk', box).forEach(el => {
@@ -544,10 +545,17 @@ async function loadDetail() {
     const d = r.data, first = !S.eps.length;
     S.eps = d.endpoints || []; S.cfg = d.config; S.ssh = d.ssh_users || [];
     S.server = d.server; S.authed = true;
-    if (!S.opts) { S.opts = loadOpts(); syncInputs(); }
+    if (S.opts) setCdn(d.server && d.server.cdn);
+    if (!S.opts) { S.opts = loadOpts(); setCdn(d.server && d.server.cdn); syncInputs(); }
     setLocked(false); renderServer(S.server); renderCreds(); renderLiveLine(); renderFilters(); renderTickets(); renderBoard();
     if (first) { document.dispatchEvent(new Event('unlocked')); setTimeout(testEdge, 900); setTimeout(() => scanServers(true), 1500); }
   } catch (e) { /* the pulse loop reports connectivity; keep last data */ }
+}
+function setCdn(cdn) {                 /* the Google Cloud CDN / load balancer address, when deploy.sh made one */
+  const had = !!ADDR_PRE.gcpcdn, host = cdn && cdn.host;
+  if (host) { ADDR_PRE.gcpcdn = ['GCP CDN', host]; SNI_PRE.gcpcdn = ['GCP CDN', host]; }
+  else { delete ADDR_PRE.gcpcdn; delete SNI_PRE.gcpcdn; }
+  if (had !== !!host || (host && $('#fAddrMode').innerHTML.indexOf(host) < 0)) { const a = $('#fAddrMode').value, s = $('#fSniMode').value; fillModes(); $('#fAddrMode').value = a; $('#fSniMode').value = s; if (S.opts) syncInputs(); }
 }
 function fillModes() {
   const opt = (v, t) => '<option value="' + v + '">' + esc(t) + '</option>';
@@ -581,12 +589,18 @@ Object.keys(TEXT_FIELDS).forEach(id => $('#' + id).addEventListener('input', ev 
 $('#fFp').addEventListener('change', ev => { S.opts.fp = ev.target.value; optsChanged(); });
 $('#fAddrMode').addEventListener('change', ev => {
   S.opts.addrMode = ev.target.value; $('#wAddr').hidden = S.opts.addrMode !== 'custom';
+  if (S.opts.addrMode === 'gcpcdn' && SNI_PRE.gcpcdn) {          /* the CDN address needs the CDN name in the TLS hello */
+    S.opts.sniMode = 'gcpcdn'; $('#fSniMode').value = 'gcpcdn'; $('#wSni').hidden = true;
+    S.opts.insecure = true; $('#fInsecure').checked = true;
+    toast('SNI set to the CDN name; certificate check is off until Google finishes issuing the CDN certificate');
+  }
   if (S.opts.addrMode === 'custom') $('#fAddr').focus();
   optsChanged();
 });
 $('#fSniMode').addEventListener('change', ev => {
   const m = S.opts.sniMode = ev.target.value; $('#wSni').hidden = m !== 'custom';
-  if (m === 'maya') { S.opts.insecure = true; $('#fInsecure').checked = true; toast('Certificate check turned off: the Maya name will not match the server certificate'); }
+  if (m === 'gcpcdn') { S.opts.insecure = true; $('#fInsecure').checked = true; toast('Certificate check is off until Google finishes issuing the CDN certificate; turn it on once it is ACTIVE'); }
+  else if (m === 'maya') { S.opts.insecure = true; $('#fInsecure').checked = true; toast('Certificate check turned off: the Maya name will not match the server certificate'); }
   else if (m !== 'custom') { S.opts.insecure = false; $('#fInsecure').checked = false; }
   if (m === 'custom') $('#fSni').focus();
   optsChanged();

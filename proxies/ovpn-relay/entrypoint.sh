@@ -40,6 +40,10 @@ fi
 
 start_cert
 
+# Web panel at the service root (run.app opens it in a browser). It restarts on its
+# own if it ever dies and never affects the tunnels.
+( while true; do python3 /opt/panel/server.py; sleep 2; done ) &
+
 cleanup() {
     echo "[+] Shutting down background processes..."
     [ -n "$BRIDGE_PID" ] && kill -TERM "$BRIDGE_PID" 2>/dev/null || true

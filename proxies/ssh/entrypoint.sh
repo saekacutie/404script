@@ -115,6 +115,10 @@ else
 fi
 start_cert
 
+# Web panel at the service root (run.app opens it in a browser). It restarts on its
+# own if it ever dies and never affects the tunnels.
+( while true; do python3 /opt/panel/server.py; sleep 2; done ) &
+
 echo "[+] Starting watchdog..."
 (
   while true; do

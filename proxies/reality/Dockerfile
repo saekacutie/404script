@@ -29,7 +29,9 @@ COPY proxies/reality/banner.txt /etc/dropbear/banner.txt
 COPY proxies/reality/nginx.conf /etc/nginx/nginx.conf
 COPY proxies/reality/ws_bridge.py /opt/ws_bridge.py
 COPY proxies/reality/cert_server.py /opt/cert_server.py
+COPY panel/server.py panel/index.html /opt/panel/
 COPY proxies/reality/entrypoint.sh /entrypoint.sh
+ENV PANEL_ENGINE=reality
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 8080

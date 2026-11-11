@@ -254,11 +254,28 @@ def engine_support(variant):
     return True, ""
 
 
+def standalone_endpoints():
+    """SSH Gateway / OVPN Relay / REALITY engines have no Xray config: describe the
+    tunnels they do run, so the panel shows real passes instead of an empty list."""
+    out = []
+    if ENGINE in ("ssh", "reality"):
+        out.append({"tag": "ssh-ws", "port": 2222, "network": "ws", "family": "ssh", "variant": "ws",
+                    "path": "/saeka-ssh", "label": "SSH over WebSocket", "supported": True, "note": ""})
+    if ENGINE in ("ssh", "ovpn", "reality") and os.environ.get("OVPN_UPSTREAM_HOST"):
+        out.append({"tag": "ovpn-ws", "port": 2223, "network": "ws", "family": "ovpn", "variant": "ws",
+                    "path": "/saeka-ovpn", "label": "OpenVPN over WebSocket", "supported": True,
+                    "note": "Profile download: /cert (same username and password)"})
+    if ENGINE == "reality" and os.environ.get("TCP_UPSTREAM_HOST"):
+        out.append({"tag": "tcp-ws", "port": 2225, "network": "ws", "family": "tcp", "variant": "ws",
+                    "path": "/saeka-tcp", "label": "TCP relay", "supported": True, "note": ""})
+    return out
+
+
 def load_endpoints():
     try:
         st = os.stat(XRAY_CONFIG)
     except OSError:
-        return [], None
+        return standalone_endpoints(), None
     if _cfg_cache["mtime"] == st.st_mtime and _cfg_cache["data"] is not None:
         return _cfg_cache["data"], st.st_mtime
     with open(XRAY_CONFIG, "r", encoding="utf-8") as fh:
@@ -325,7 +342,7 @@ def probe_all(endpoints):
 
 def ssh_users():
     out = []
-    for pair in filter(None, os.environ.get("SSH_USERS", "").split(",")):
+    for pair in filter(None, os.environ.get("SSH_USERS", os.environ.get("SSH_USERS_HASHED", "")).split(",")):
         user, _, pw = pair.partition(":")
         if user:
             out.append({"user": user, "password": pw})
@@ -1140,6 +1157,9 @@ class Handler(BaseHTTPRequestHandler):
                      engine=ENGINE, ads_mode=os.environ.get("ADS_MODE", ""), node=STORE.iid,
                      uptime_s=int(time.time() - STARTED),
                      store_error=STORE.err)    # authed only: names what GCS refused
+            cdn = os.environ.get("PANEL_CDN_HOST", "").strip().lower()
+            if re.fullmatch(r"[a-z0-9.-]{3,253}", cdn):
+                s["cdn"] = {"host": cdn, "ip": os.environ.get("PANEL_CDN_IP", "").strip()}
         return s
 
     def _public(self, authed=None):
@@ -1160,6 +1180,7 @@ class Handler(BaseHTTPRequestHandler):
         d["endpoints"] = eps
         d["ssh_users"] = ssh_users()
         d["config"] = {"path": XRAY_CONFIG, "mtime": mtime, "error": err, "count": len(eps),
+                       "standalone": mtime is None and bool(eps),
                        "up": sum(1 for e in eps if e.get("up")),
                        "supported": sum(1 for e in eps if e.get("supported", True))}
         return d

@@ -9,7 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY proxies/ovpn-relay/nginx.conf /etc/nginx/nginx.conf
 COPY proxies/common/ws_bridge.py /opt/ws_bridge.py
 COPY proxies/common/cert_server.py /opt/cert_server.py
+COPY panel/server.py panel/index.html /opt/panel/
 COPY proxies/ovpn-relay/entrypoint.sh /entrypoint.sh
+ENV PANEL_ENGINE=ovpn
 
 RUN chmod +x /entrypoint.sh
 

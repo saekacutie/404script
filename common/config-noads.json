@@ -66,7 +66,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -97,7 +98,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -130,7 +132,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -161,7 +164,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -193,7 +197,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -225,7 +230,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -259,7 +265,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -291,7 +298,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -323,7 +331,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -355,7 +364,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -389,7 +399,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -421,7 +432,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -453,7 +465,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       }
     },
@@ -478,7 +491,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       }
     },
@@ -505,7 +519,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       }
     },
@@ -530,7 +545,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       }
     },
@@ -556,7 +572,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -590,7 +607,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -624,7 +642,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       },
       "sniffing": {
@@ -658,7 +677,8 @@
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveInterval": 15
+          "tcpKeepAliveInterval": 15,
+          "tcpKeepAliveIdle": 30
         }
       }
     },
@@ -684,7 +704,15 @@
   "outbounds": [
     {
       "protocol": "freedom",
-      "tag": "direct"
+      "tag": "direct",
+      "streamSettings": {
+        "sockopt": {
+          "tcpKeepAliveIdle": 30,
+          "tcpKeepAliveInterval": 15,
+          "tcpNoDelay": true,
+          "domainStrategy": "UseIPv4"
+        }
+      }
     },
     {
       "protocol": "blackhole",
@@ -722,5 +750,20 @@
         "outboundTag": "direct"
       }
     ]
+  },
+  "policy": {
+    "levels": {
+      "0": {
+        "handshake": 8,
+        "connIdle": 3600,
+        "uplinkOnly": 30,
+        "downlinkOnly": 60,
+        "bufferSize": 1024
+      }
+    },
+    "system": {
+      "statsInboundUplink": false,
+      "statsInboundDownlink": false
+    }
   }
 }

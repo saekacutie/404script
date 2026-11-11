@@ -758,6 +758,86 @@ fi
 
 SSH_USERS_CSV=""; SSH_HASHED_CSV=""; SSH_USER_LIST=()
 OVPN_HOST=""; OVPN_PORT=1194; OVPN_PROFILE=""
+# Web panel setup, shared by every engine: sets PANEL_KEY, PANEL_BUCKET, PANEL_OBJECT.
+setup_panel() {
+    # ------------------------------------------------------------------
+    # SAEKA PANEL (served at the service root by every Xray engine above).
+    #   PANEL_KEY    - access key that unlocks credentials / links in the UI.
+    #                  Pre-set it with `PANEL_KEY=... ./deploy.sh`, type one
+    #                  below, or let this script generate one.
+    #   PANEL_BUCKET - Cloud Storage bucket holding the shared visitor counter,
+    #                  so totals survive restarts and every Cloud Run instance
+    #                  adds to the same number. Optional: if it can't be
+    #                  created the panel still works with per-instance counters.
+    # ------------------------------------------------------------------
+    echo -e "  ${CYAN}==================================================${RESET}"
+    echo -e "  ${GREEN}                  WEB PANEL${RESET}"
+    echo -e "  ${CYAN}==================================================${RESET}"
+    PANEL_KEY="${PANEL_KEY:-}"
+    if [ -z "$PANEL_KEY" ]; then
+        read -r -p "$(echo -e "  ${CYAN}Panel access key (blank = auto-generate): ${RESET}")" PANEL_KEY_IN
+        PANEL_KEY=$(printf '%s' "$PANEL_KEY_IN" | tr -dc 'A-Za-z0-9_-')
+    fi
+    if [ -z "$PANEL_KEY" ]; then
+        PANEL_KEY=$( (openssl rand -hex 8 2>/dev/null || date +%s%N | sha256sum) | tr -dc 'a-f0-9' | cut -c1-16 || true)
+    fi
+    # The service account the Cloud Run service actually runs as: whatever an
+    # existing revision uses, else the project's default compute account.
+    resolve_runtime_sa() {
+        local sa
+        sa=$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --project="$PROJECT_ID" \
+                --format='value(spec.template.spec.serviceAccountName)' 2>/dev/null | tr -d '[:space:]' || true)
+        printf '%s' "${sa:-$DEFAULT_SA}"
+    }
+
+    # Give a service account read/write on the counter bucket. Retries (a new
+    # account or bucket can take a few seconds to be visible) and keeps the
+    # real error in BUCKET_IAM_ERR instead of throwing it away.
+    BUCKET_IAM_ERR=""
+    bucket_grant() {
+        local sa="$1" bkt="${2:-$PANEL_BUCKET}" out="" attempt
+        [ -n "$sa" ] || { BUCKET_IAM_ERR="runtime service account unknown"; return 1; }
+        for attempt in 1 2 3; do
+            if out=$(gcloud storage buckets add-iam-policy-binding "gs://${bkt}" \
+                        --member="serviceAccount:${sa}" --role="roles/storage.objectAdmin" --quiet 2>&1); then
+                BUCKET_IAM_ERR=""
+                return 0
+            fi
+            sleep 4
+        done
+        BUCKET_IAM_ERR=$(printf '%s' "$out" | grep -v '^$' | tail -n 2 | tr '\n' ' ')
+        return 1
+    }
+
+    # One bucket per PROJECT (not per service): every deploy from this script
+    # writes itself into panel/servers.json there, so the panel's "Find server"
+    # lists them all. Each service keeps its own counter object in it.
+    PANEL_BUCKET=$(printf '%s' "${PROJECT_ID}-saeka-panel" | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-' | cut -c1-63 | sed 's/-*$//')
+    if gcloud storage buckets describe "gs://${PANEL_BUCKET}" --project="$PROJECT_ID" >/dev/null 2>&1 \
+        || { can storage.buckets.create \
+             && run_quiet "Creating visitor-counter bucket" panel-bucket.log \
+                gcloud storage buckets create "gs://${PANEL_BUCKET}" --project="$PROJECT_ID" \
+                    --location="$REGION" --uniform-bucket-level-access \
+                    --public-access-prevention --quiet; }; then
+        rm -f panel-bucket.log
+        RUNTIME_SA=$(resolve_runtime_sa)
+        if bucket_grant "$RUNTIME_SA"; then
+            echo -e "  ${GREEN}Bucket access granted to ${RUNTIME_SA}.${RESET}"
+        else
+            warn "Couldn't grant bucket access to ${RUNTIME_SA:-the runtime service account}: ${BUCKET_IAM_ERR}"
+            warn "Continuing - many projects already give that account access through the Editor role."
+            warn "The check after deploy will confirm whether the counter really syncs."
+        fi
+        echo -e "  ${GREEN}Visitor counter store: gs://${PANEL_BUCKET}${RESET}"
+    else
+        PANEL_BUCKET=""
+        warn "Could not create a counter bucket - the panel will count per instance only."
+    fi
+    echo ""
+    PANEL_OBJECT="panel/state-${SERVICE_NAME}.json"
+}
+
+SSH_USERS_CSV=""
 if [ "$PROXY_ENV" == "ssh" ]; then
     echo -e "  ${CYAN}==================================================${RESET}"
     echo -e "  ${GREEN}           SSH GATEWAY - TUNNEL USERS${RESET}"
@@ -867,82 +947,13 @@ elif [ "$PROXY_ENV" == "reality" ]; then
         [ -z "$OVPN_PROFILE" ] || ENV_VARS="${ENV_VARS}@OVPN_PROFILE_B64=${OVPN_PROFILE}"
     fi
 else
-    # ------------------------------------------------------------------
-    # SAEKA PANEL (served at the service root by every Xray engine above).
-    #   PANEL_KEY    - access key that unlocks credentials / links in the UI.
-    #                  Pre-set it with `PANEL_KEY=... ./deploy.sh`, type one
-    #                  below, or let this script generate one.
-    #   PANEL_BUCKET - Cloud Storage bucket holding the shared visitor counter,
-    #                  so totals survive restarts and every Cloud Run instance
-    #                  adds to the same number. Optional: if it can't be
-    #                  created the panel still works with per-instance counters.
-    # ------------------------------------------------------------------
-    echo -e "  ${CYAN}==================================================${RESET}"
-    echo -e "  ${GREEN}                  WEB PANEL${RESET}"
-    echo -e "  ${CYAN}==================================================${RESET}"
-    PANEL_KEY="${PANEL_KEY:-}"
-    if [ -z "$PANEL_KEY" ]; then
-        read -r -p "$(echo -e "  ${CYAN}Panel access key (blank = auto-generate): ${RESET}")" PANEL_KEY_IN
-        PANEL_KEY=$(printf '%s' "$PANEL_KEY_IN" | tr -dc 'A-Za-z0-9_-')
-    fi
-    if [ -z "$PANEL_KEY" ]; then
-        PANEL_KEY=$( (openssl rand -hex 8 2>/dev/null || date +%s%N | sha256sum) | tr -dc 'a-f0-9' | cut -c1-16 || true)
-    fi
-    # The service account the Cloud Run service actually runs as: whatever an
-    # existing revision uses, else the project's default compute account.
-    resolve_runtime_sa() {
-        local sa
-        sa=$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --project="$PROJECT_ID" \
-                --format='value(spec.template.spec.serviceAccountName)' 2>/dev/null | tr -d '[:space:]' || true)
-        printf '%s' "${sa:-$DEFAULT_SA}"
-    }
-
-    # Give a service account read/write on the counter bucket. Retries (a new
-    # account or bucket can take a few seconds to be visible) and keeps the
-    # real error in BUCKET_IAM_ERR instead of throwing it away.
-    BUCKET_IAM_ERR=""
-    bucket_grant() {
-        local sa="$1" bkt="${2:-$PANEL_BUCKET}" out="" attempt
-        [ -n "$sa" ] || { BUCKET_IAM_ERR="runtime service account unknown"; return 1; }
-        for attempt in 1 2 3; do
-            if out=$(gcloud storage buckets add-iam-policy-binding "gs://${bkt}" \
-                        --member="serviceAccount:${sa}" --role="roles/storage.objectAdmin" --quiet 2>&1); then
-                BUCKET_IAM_ERR=""
-                return 0
-            fi
-            sleep 4
-        done
-        BUCKET_IAM_ERR=$(printf '%s' "$out" | grep -v '^$' | tail -n 2 | tr '\n' ' ')
-        return 1
-    }
-
-    # One bucket per PROJECT (not per service): every deploy from this script
-    # writes itself into panel/servers.json there, so the panel's "Find server"
-    # lists them all. Each service keeps its own counter object in it.
-    PANEL_BUCKET=$(printf '%s' "${PROJECT_ID}-saeka-panel" | tr 'A-Z_' 'a-z-' | tr -cd 'a-z0-9-' | cut -c1-63 | sed 's/-*$//')
-    if gcloud storage buckets describe "gs://${PANEL_BUCKET}" --project="$PROJECT_ID" >/dev/null 2>&1 \
-        || { can storage.buckets.create \
-             && run_quiet "Creating visitor-counter bucket" panel-bucket.log \
-                gcloud storage buckets create "gs://${PANEL_BUCKET}" --project="$PROJECT_ID" \
-                    --location="$REGION" --uniform-bucket-level-access \
-                    --public-access-prevention --quiet; }; then
-        rm -f panel-bucket.log
-        RUNTIME_SA=$(resolve_runtime_sa)
-        if bucket_grant "$RUNTIME_SA"; then
-            echo -e "  ${GREEN}Bucket access granted to ${RUNTIME_SA}.${RESET}"
-        else
-            warn "Couldn't grant bucket access to ${RUNTIME_SA:-the runtime service account}: ${BUCKET_IAM_ERR}"
-            warn "Continuing - many projects already give that account access through the Editor role."
-            warn "The check after deploy will confirm whether the counter really syncs."
-        fi
-        echo -e "  ${GREEN}Visitor counter store: gs://${PANEL_BUCKET}${RESET}"
-    else
-        PANEL_BUCKET=""
-        warn "Could not create a counter bucket - the panel will count per instance only."
-    fi
-    echo ""
-    PANEL_OBJECT="panel/state-${SERVICE_NAME}.json"
+    setup_panel
     ENV_VARS="ADS_MODE=${ADS_MODE},PANEL_KEY=${PANEL_KEY},PANEL_BUCKET=${PANEL_BUCKET},PANEL_OBJECT=${PANEL_OBJECT}"
+fi
+if [ "$STANDALONE" -eq 1 ]; then
+    # SSH / OVPN / REALITY engines carry the panel too (run.app opens it in a browser).
+    setup_panel
+    ENV_VARS="${ENV_VARS}@PANEL_KEY=${PANEL_KEY}@PANEL_BUCKET=${PANEL_BUCKET}@PANEL_OBJECT=${PANEL_OBJECT}"
 fi
 
 # --allow-unauthenticated makes the service public by granting allUsers the
@@ -1071,7 +1082,7 @@ if [ "$STANDALONE" -eq 1 ]; then
     echo ""
 fi
 
-if [ "$STANDALONE" -eq 0 ]; then
+if true; then
     PANEL_URL="https://${CLEAN_HOST}"
     PANEL_UP="no"
     for _ in 1 2 3 4 5 6 7 8; do
@@ -1223,10 +1234,11 @@ echo -e "  ${YELLOW}Google Managed Certs take 15-60 mins. To bypass the wait, yo
 echo -e "  ${WHITE}1) Enter a Domain : ${YELLOW}Auto-generates Google cert (Stacks all past domains. Takes up to 1 hr)${RESET}"
 echo -e "  ${WHITE}2) Type UNIVERSAL : ${YELLOW}Instant self-signed cert. (Use with Cloudflare 'Full' SSL for instant valid cert!)${RESET}"
 echo -e "  ${WHITE}3) Type LOCAL     : ${YELLOW}Instantly uploads your own 'cert.pem' and 'key.pem' from this folder.${RESET}"
+echo -e "  ${WHITE}4) Type AUTO      : ${YELLOW}Google-only, no domain needed: <ip>.sslip.io + Google cert + Cloud CDN edge.${RESET}"
 echo ""
 read -r -p "$(echo -e "  ${CYAN}Input (Domain / UNIVERSAL / LOCAL) or blank to skip: ${RESET}")" LB_INPUT
 
-if [ -n "$LB_INPUT" ] && [ "$LB_INPUT" != "UNIVERSAL" ] && [ "$LB_INPUT" != "LOCAL" ]; then
+if [ -n "$LB_INPUT" ] && [ "$LB_INPUT" != "UNIVERSAL" ] && [ "$LB_INPUT" != "LOCAL" ] && [ "$LB_INPUT" != "AUTO" ]; then
     echo -e "  ${CYAN}Checking that ${LB_INPUT} actually resolves before touching the LB...${RESET}"
     DOMAIN_UP=0
     for _ in $(seq 1 3); do
@@ -1267,6 +1279,17 @@ if [ -n "$LB_INPUT" ]; then
             gcloud compute addresses create "$IP_NAME" --global --project="$PROJECT_ID" || lb_setup_failed=1
     fi
     STATIC_IP=$(gcloud compute addresses describe "$IP_NAME" --global --project="$PROJECT_ID" --format='value(address)' 2>/dev/null)
+    if [ "$LB_INPUT" == "AUTO" ]; then
+        # sslip.io resolves <a-b-c-d>.sslip.io to a.b.c.d, so Google can validate and
+        # issue a managed certificate without you owning a domain.
+        if [ -n "$STATIC_IP" ]; then
+            LB_INPUT="${STATIC_IP//./-}.sslip.io"
+            echo -e "  ${GREEN}AUTO domain: ${LB_INPUT}${RESET}"
+        else
+            lb_setup_failed=1; LB_INPUT="UNIVERSAL"
+            warn "No static IP could be reserved - falling back to the self-signed universal cert."
+        fi
+    fi
 
     if ! gcloud compute network-endpoint-groups describe "$NEG_NAME" --region="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating serverless NEG" lb.log \
@@ -1278,7 +1301,9 @@ if [ -n "$LB_INPUT" ]; then
     # Google Cloud CDN is switched on for the backend. USE_ORIGIN_HEADERS means only
     # responses that explicitly say "public, max-age" are cached, so tunnels, logins
     # and APIs are never cached - they simply ride Google's edge network.
-    CDN_FLAGS=(--enable-cdn --cache-mode=USE_ORIGIN_HEADERS --timeout=3600)
+    # GCP_CDN=0 ./deploy.sh keeps the long timeout but leaves Cloud CDN off.
+    if [ "${GCP_CDN:-1}" = "0" ]; then CDN_FLAGS=(--no-enable-cdn --timeout=3600)
+    else CDN_FLAGS=(--enable-cdn --cache-mode=USE_ORIGIN_HEADERS --timeout=3600); fi
     if ! gcloud compute backend-services describe "$BACKEND_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating backend service (Cloud CDN on)" lb.log \
             gcloud compute backend-services create "$BACKEND_NAME" --global "${CDN_FLAGS[@]}" --project="$PROJECT_ID" || lb_setup_failed=1
@@ -1288,7 +1313,7 @@ if [ -n "$LB_INPUT" ]; then
                 --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
-    CDN_STATE="on"
+    CDN_STATE="on"; [ "${GCP_CDN:-1}" = "0" ] && CDN_STATE="off (GCP_CDN=0)"
     if ! run_quiet "Enabling Cloud CDN + long timeout on the backend" lb-cdn.log \
             gcloud compute backend-services update "$BACKEND_NAME" --global "${CDN_FLAGS[@]}" --project="$PROJECT_ID"; then
         # Older gcloud / a policy may refuse a flag; fall back to CDN alone.
@@ -1359,7 +1384,7 @@ if [ -n "$LB_INPUT" ]; then
         run_quiet "Creating HTTPS proxy with cert(s)" lb.log \
             gcloud compute target-https-proxies create "$HTTPS_PROXY_NAME" \
                 --url-map="$URLMAP_NAME" --ssl-certificates="$FINAL_CERTS" \
-                --global --project="$PROJECT_ID" || lb_setup_failed=1
+                --quic-override=ENABLE --global --project="$PROJECT_ID" || lb_setup_failed=1
     else
         run_quiet "Repointing HTTPS proxy to new cert(s)" lb.log \
             gcloud compute target-https-proxies update "$HTTPS_PROXY_NAME" \
@@ -1374,6 +1399,11 @@ if [ -n "$LB_INPUT" ]; then
     fi
 
     if [ "$lb_setup_failed" -eq 0 ]; then
+        # Tell the panel about the CDN address so "GCP CDN" appears in its Address / SNI lists.
+        run_quiet "Telling the panel its CDN address" lb.log \
+            gcloud run services update "$SERVICE_NAME" --region "$REGION" --project="$PROJECT_ID" \
+                --update-env-vars "^@^PANEL_CDN_HOST=${FINAL_HOST}@PANEL_CDN_IP=${STATIC_IP}" --quiet \
+            || warn "Could not set PANEL_CDN_HOST (the panel just won't list the CDN preset)."
         echo ""
         echo -e "  ${GREEN}Load Balancer ready.${RESET}"
         echo -e "  ${CYAN}STATIC IP: ${GREEN}${STATIC_IP}${RESET}"

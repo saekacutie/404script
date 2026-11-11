@@ -9,7 +9,7 @@
   --line:#37332c; --line-2:#4d483d;
   --chalk:#ece6d8; --chalk-2:#cdc6b5; --muted:#9d9585; --dim:#6f695c;
   --amber:#ffb21a; --amber-2:#d99207; --verm:#ff5a36; --ok:#8fd16a;
-  --f-vless:#ffb21a; --f-vmess:#7fb5b0; --f-trojan:#e0705a; --f-ss:#a9c46b; --f-ssh:#d8d1bf;
+  --f-vless:#ffb21a; --f-vmess:#7fb5b0; --f-trojan:#e0705a; --f-ss:#a9c46b; --f-ssh:#d8d1bf; --f-ovpn:#e8a0c8; --f-tcp:#9fb4e0;
   --ff-d:"Big Shoulders Display","Arial Narrow","Helvetica Neue",Impact,sans-serif;
   --ff-b:"Hanken Grotesk","Segoe UI",system-ui,-apple-system,sans-serif;
   --ff-m:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
@@ -194,7 +194,7 @@ select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 50
   transition:transform .25s var(--ease),border-color .25s var(--ease)}
 .tk:hover{transform:translateY(-3px);border-color:var(--c)}
 .tk[data-f=vless]{--c:var(--f-vless)}.tk[data-f=vmess]{--c:var(--f-vmess)}.tk[data-f=trojan]{--c:var(--f-trojan)}
-.tk[data-f=ss]{--c:var(--f-ss)}.tk[data-f=ssh]{--c:var(--f-ssh)}
+.tk[data-f=ss]{--c:var(--f-ss)}.tk[data-f=ssh]{--c:var(--f-ssh)}.tk[data-f=ovpn]{--c:var(--f-ovpn)}.tk[data-f=tcp]{--c:var(--f-tcp)}
 .tk.off{opacity:.55}
 .tk-main{padding:16px 16px 14px 20px;min-width:0;border-left:5px solid var(--c);border-radius:4px 0 0 4px}
 .tk-h{display:flex;align-items:baseline;gap:10px;justify-content:space-between}

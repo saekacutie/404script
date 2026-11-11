@@ -233,6 +233,10 @@ fi
 # /cert: answers 503 unless both OVPN_PROFILE_B64 and users exist
 launch "cert_server" python3 /opt/cert_server.py
 
+# Web panel at the service root (run.app opens it in a browser). It restarts on its
+# own if it ever dies and never affects the tunnels.
+( while true; do python3 /opt/panel/server.py; sleep 2; done ) &
+
 # nginx goes up LAST, once the local services accept connections, so no request
 # can arrive while a bridge is still booting (that window is a 502/503).
 wait_port() {

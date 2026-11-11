@@ -229,6 +229,27 @@ class T(unittest.TestCase):
         self.assertFalse(server.HOST_RE.match("a.b.example.com"))
         self.assertTrue(server.HOST_RE.match("svc-abc-uc.a.run.app"))
 
+    def test_standalone_engines_describe_their_tunnels(self):
+        saved = (server.XRAY_CONFIG, server.ENGINE, dict(os.environ))
+        try:
+            server.XRAY_CONFIG = "/nonexistent/config.json"; server._cfg_cache.update(mtime=None, data=None)
+            os.environ.pop("OVPN_UPSTREAM_HOST", None); os.environ.pop("TCP_UPSTREAM_HOST", None)
+            server.ENGINE = "ssh"
+            eps, mtime = server.load_endpoints()
+            self.assertIsNone(mtime); self.assertEqual([e["family"] for e in eps], ["ssh"])
+            self.assertEqual(eps[0]["path"], "/saeka-ssh")
+            os.environ["OVPN_UPSTREAM_HOST"] = "10.0.0.5"
+            self.assertEqual([e["path"] for e in server.load_endpoints()[0]], ["/saeka-ssh", "/saeka-ovpn"])
+            server.ENGINE = "ovpn"
+            self.assertEqual([e["path"] for e in server.load_endpoints()[0]], ["/saeka-ovpn"])
+            server.ENGINE = "reality"; os.environ["TCP_UPSTREAM_HOST"] = "1.2.3.4"
+            self.assertEqual([e["family"] for e in server.load_endpoints()[0]], ["ssh", "ovpn", "tcp"])
+            os.environ["SSH_USERS_HASHED"] = "bob:$6$x"; os.environ.pop("SSH_USERS", None)
+            self.assertEqual(server.ssh_users()[0]["user"], "bob")
+        finally:
+            server.XRAY_CONFIG, server.ENGINE = saved[0], saved[1]
+            os.environ.clear(); os.environ.update(saved[2]); server._cfg_cache.update(mtime=None, data=None)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
