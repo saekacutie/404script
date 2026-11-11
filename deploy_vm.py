@@ -10,6 +10,7 @@ only have Cloudflare Zone DNS Edit permission.
 """
 from __future__ import annotations
 import getpass
+import base64
 import json
 import os
 import secrets
@@ -127,6 +128,27 @@ def guest_result(project_id: str, zone: str, name: str) -> dict | None:
     except json.JSONDecodeError:
         return None
 
+def guest_value(project_id: str, zone: str, name: str, key: str) -> str:
+    r = cmd(["gcloud", "compute", "instances", "get-guest-attributes", name, "--zone", zone,
+             "--project", project_id, f"--query-path=saeka/{key}", "--format=value(value)"],
+            capture=True, check=False)
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+def fetch_ovpn_profile(project_id: str, zone: str, name: str, chunks: int) -> str:
+    """The client .ovpn, base64, reassembled from the guest-attribute chunks ('' if incomplete)."""
+    parts = []
+    for i in range(int(chunks or 0)):
+        part = guest_value(project_id, zone, name, f"ovpn{i}")
+        if not part:
+            return ""
+        parts.append(part)
+    raw = "".join(parts)
+    try:
+        text = base64.b64decode(raw, validate=True).decode("utf-8", "replace")
+    except ValueError:
+        return ""
+    return raw if "<ca>" in text and "remote " in text else ""
+
 def pick_zone(project_id: str, region: str) -> str:
     r = cmd(["gcloud", "compute", "zones", "list", "--project", project_id,
              f"--filter=region:{region} AND status=UP", "--format=value(name)"], capture=True, check=False)
@@ -205,7 +227,7 @@ exec > /var/log/vm-setup.log 2>&1
 # The result is also published as a guest attribute, so the deployer can read it
 # without SSH/IAP (which restricted lab accounts often can't use).
 publish() { curl -sf -X PUT -H 'Metadata-Flavor: Google' --data-binary @"$1" \
-  http://metadata.google.internal/computeMetadata/v1/instance/guest-attributes/saeka/ready >/dev/null 2>&1 || true; }
+  "http://metadata.google.internal/computeMetadata/v1/instance/guest-attributes/saeka/${2:-ready}" >/dev/null 2>&1 || true; }
 trap 'printf "{\"status\":\"failed\",\"line\":\"%s\"}" "$LINENO" > /etc/vm-setup-complete.json; publish /etc/vm-setup-complete.json' ERR
 export DEBIAN_FRONTEND=noninteractive
 
@@ -238,6 +260,7 @@ net.core.wmem_max=16777216
 EOF
 sysctl --system >/dev/null 2>&1 || true
 
+OVPN_CHUNKS=0
 REALITY_JSON='{"enabled":false}'; OVPN_JSON='{"enabled":false}'; SSH_JSON='{"enabled":false}'
 
 if [ "$REALITY" = true ]; then
@@ -342,14 +365,16 @@ if [ "$OVPN" = true ]; then
   apt-get install -y openvpn easy-rsa iptables-persistent
 
   EZ=/etc/openvpn/easy-rsa; mkdir -p "$EZ"; cp -r /usr/share/easy-rsa/* "$EZ"/; cd "$EZ"
+  # EC certificates: generated in seconds (RSA + DH takes minutes on a micro VM)
+  # and keep the client profile small.
+  export EASYRSA_ALGO=ec EASYRSA_CURVE=prime256v1 EASYRSA_BATCH=1
   ./easyrsa init-pki
   ./easyrsa --batch build-ca nopass
   ./easyrsa --batch gen-req server nopass
   ./easyrsa --batch sign-req server server
   ./easyrsa --batch gen-req client1 nopass
   ./easyrsa --batch sign-req client client1
-  ./easyrsa gen-dh
-  openvpn --genkey tls-crypt "$EZ/tc.key"
+  openvpn --genkey secret "$EZ/tc.key" 2>/dev/null || openvpn --genkey tls-crypt "$EZ/tc.key"
 
   mkdir -p /etc/openvpn/server
   cat > /etc/openvpn/server/server.conf <<EOF
@@ -359,26 +384,46 @@ dev tun
 ca $EZ/pki/ca.crt
 cert $EZ/pki/issued/server.crt
 key $EZ/pki/private/server.key
-dh $EZ/pki/dh.pem
+dh none
 tls-crypt $EZ/tc.key
+topology subnet
 server 10.8.0.0 255.255.255.0
 push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 1.1.1.1"
-keepalive 10 120
-cipher AES-256-GCM
+push "dhcp-option DNS 8.8.8.8"
+keepalive 10 60
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+data-ciphers-fallback AES-256-GCM
 auth SHA256
+tls-version-min 1.2
+mssfix 1360
+sndbuf 0
+rcvbuf 0
+max-clients 100
 user nobody
 group nogroup
 persist-key
 persist-tun
+status /var/log/openvpn-status.log 30
+verb 2
 EOF
-  [ "$OPROTO" = udp ] && echo 'explicit-exit-notify 1' >> /etc/openvpn/server/server.conf
+  if [ "$OPROTO" = udp ]; then echo 'explicit-exit-notify 1' >> /etc/openvpn/server/server.conf
+  else echo 'tcp-nodelay' >> /etc/openvpn/server/server.conf; fi
 
   echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-openvpn.conf
   sysctl --system >/dev/null 2>&1 || true
 
   iptables -t nat -C POSTROUTING -s 10.8.0.0/24 -o "$IFACE" -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "$IFACE" -j MASQUERADE
+  # VPN users must not reach the cloud metadata server or private networks.
+  for NET in 169.254.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+    iptables -C FORWARD -s 10.8.0.0/24 -d "$NET" -j DROP 2>/dev/null || \
+      iptables -I FORWARD 1 -s 10.8.0.0/24 -d "$NET" -j DROP
+  done
+  iptables -C INPUT -i tun+ -p tcp --dport 22 -j DROP 2>/dev/null || iptables -A INPUT -i tun+ -p tcp --dport 22 -j DROP
+  # MSS clamping avoids stalls on paths with a lower MTU.
+  iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+    iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
   netfilter-persistent save >/dev/null 2>&1 || true
   systemctl enable --now openvpn-server@server
@@ -392,19 +437,36 @@ EOF
     echo "nobind"
     echo "persist-key"
     echo "persist-tun"
+    echo "resolv-retry infinite"
+    echo "connect-retry 2 10"
     echo "remote-cert-tls server"
-    echo "cipher AES-256-GCM"
+    echo "data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305"
+    echo "data-ciphers-fallback AES-256-GCM"
     echo "auth SHA256"
+    echo "mssfix 1360"
+    echo "sndbuf 0"
+    echo "rcvbuf 0"
+    echo "verb 3"
     echo '<ca>'; pem "$EZ/pki/ca.crt"; echo '</ca>'
     echo '<cert>'; pem "$EZ/pki/issued/client1.crt"; echo '</cert>'
     echo '<key>'; pem "$EZ/pki/private/client1.key"; echo '</key>'
     echo '<tls-crypt>'; cat "$EZ/tc.key"; echo '</tls-crypt>'
   } > /root/client1.ovpn
   chmod 600 /root/client1.ovpn
+  # Guest attributes hold 4 KB per key: ship the profile base64-chunked so the
+  # deployer needs no SSH at all.
+  base64 -w0 /root/client1.ovpn > /root/client1.b64
+  OVPN_CHUNKS=0
+  while IFS= read -r -d '' -n 3000 chunk || [ -n "$chunk" ]; do
+    printf '%s' "$chunk" > "/root/chunk.$OVPN_CHUNKS"
+    publish "/root/chunk.$OVPN_CHUNKS" "ovpn$OVPN_CHUNKS"
+    rm -f "/root/chunk.$OVPN_CHUNKS"
+    OVPN_CHUNKS=$((OVPN_CHUNKS + 1))
+  done < /root/client1.b64
 
   if systemctl is-active --quiet openvpn-server@server; then
-    OVPN_JSON=$(jq -n --arg proto "$OPROTO" --argjson port "$OPORT" \
-      '{enabled:true,proto:$proto,port:$port}')
+    OVPN_JSON=$(jq -n --arg proto "$OPROTO" --argjson port "$OPORT" --argjson chunks "$OVPN_CHUNKS" \
+      '{enabled:true,proto:$proto,port:$port,chunks:$chunks}')
   fi
 fi
 
@@ -472,6 +534,7 @@ def main() -> None:
     ap.add_argument("--sni", default="www.microsoft.com")
     ap.add_argument("--dest", default="")
     ap.add_argument("--ovpn-port", type=int, default=0, help="enable OpenVPN on this port (0 = off)")
+    ap.add_argument("--no-reality", action="store_true", help="auto mode: skip REALITY (OpenVPN only)")
     ap.add_argument("--out", default="", help="write the result JSON here (auto mode)")
     args = ap.parse_args()
     AUTO = args.auto
@@ -485,11 +548,14 @@ def main() -> None:
     if AUTO:
         zone = args.zone or pick_zone(project_id, args.region)
         name, machine = args.name, args.machine
-        reality, ovpn, ssh_tunnel = True, args.ovpn_port > 0, False
+        reality, ovpn, ssh_tunnel = (not args.no_reality), args.ovpn_port > 0, False
+        if not (reality or ovpn):
+            die("nothing to install: use REALITY and/or --ovpn-port")
         rport, oport, oproto = args.reality_port, args.ovpn_port or 1194, "tcp"
         sni = sni_list(args.sni)
         dest = args.dest or f"{sni.split(',')[0]}:443"
-        print(f"  Zone {zone}, VM {name} ({machine}), REALITY :{rport}, names {sni}")
+        what = ", ".join(x for x in (f"REALITY :{rport} ({sni})" if reality else "", f"OpenVPN tcp:{oport}" if ovpn else "") if x)
+        print(f"  Zone {zone}, VM {name} ({machine}): {what}")
     else:
         zone = ask("GCE zone", "us-central1-a")
         name = ask("VM name", "saeka-tcp")
@@ -533,7 +599,8 @@ def main() -> None:
     script_path.chmod(0o700)
 
     existing = guest_result(project_id, zone, name)
-    if existing and existing.get("status") == "ready" and existing.get("reality", {}).get("enabled") == reality:
+    if existing and existing.get("status") == "ready" and existing.get("reality", {}).get("enabled") == reality \
+            and bool((existing.get("openvpn") or {}).get("enabled")) == ovpn:
         print(colour(f"  VM {name} is already set up - reusing it.", YELLOW))
         result = existing
     else:
@@ -554,7 +621,7 @@ def main() -> None:
 
     out: dict = {"ip": ip, "host": host, "zone": zone, "name": name, "reality": {"enabled": False}}
     r = result.get("reality", {})
-    if r.get("enabled"):
+    if reality and r.get("enabled"):
         link = reality_link(host, r)
         out["reality"] = dict(r, link=link)
         (WORKDIR / f"{name}-reality.txt").write_text(link + "\n")
@@ -565,19 +632,34 @@ def main() -> None:
         print(colour(f"REALITY did not start: {err}", RED))
         print(f"  Inspect: gcloud compute ssh {name} --zone {zone} --tunnel-through-iap --command 'sudo journalctl -u xray -n 30 --no-pager'")
 
-    if ovpn and not AUTO and scp(project_id, zone, name, "/root/client1.ovpn", WORKDIR / f"{name}-client1.ovpn"):
-        (WORKDIR / f"{name}-client1.ovpn").chmod(0o600)
-        print(f"OpenVPN profile: {WORKDIR / f'{name}-client1.ovpn'}")
-    elif ovpn:
-        print(f"OpenVPN profile: gcloud compute scp {name}:/root/client1.ovpn . --zone {zone} --tunnel-through-iap")
-
     if ssh_tunnel:
         print(f"SSH SOCKS: ssh -i {key_path} -D 1080 -N tunnel@{host}")
+
+    o = result.get("openvpn", {}) or {}
+    if ovpn and o.get("enabled"):
+        profile = fetch_ovpn_profile(project_id, zone, name, o.get("chunks", 0))
+        out["openvpn"] = {"enabled": True, "port": o.get("port", oport), "proto": o.get("proto", oproto),
+                          "profile_b64": profile}
+        pf = WORKDIR / f"{name}-client1.ovpn"
+        if profile:
+            pf.write_bytes(base64.b64decode(profile)); pf.chmod(0o600)
+            print(f"OpenVPN profile saved: {pf}")
+        elif not AUTO and scp(project_id, zone, name, "/root/client1.ovpn", pf):
+            pf.chmod(0o600)
+            out["openvpn"]["profile_b64"] = base64.b64encode(pf.read_bytes()).decode()
+            print(f"OpenVPN profile saved: {pf}")
+        else:
+            print(colour("Could not read the OpenVPN profile back; fetch it with: gcloud compute scp "
+                         f"{name}:/root/client1.ovpn . --zone {zone} --tunnel-through-iap", YELLOW))
+    elif ovpn:
+        print(colour("OpenVPN did not start - inspect with: gcloud compute ssh %s --zone %s --tunnel-through-iap "
+                     "--command 'sudo journalctl -u openvpn-server@server -n 30 --no-pager'" % (name, zone), RED))
+        out["openvpn"] = {"enabled": False}
 
     if args.out:
         Path(args.out).write_text(json.dumps(out))
     if AUTO:
-        if reality and not out["reality"]["enabled"]:
+        if (reality and not out["reality"]["enabled"]) or (ovpn and not out.get("openvpn", {}).get("enabled")):
             raise SystemExit(2)
         return
 

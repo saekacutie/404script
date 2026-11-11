@@ -27,3 +27,4 @@ panel/vendor/
 panel/build.py
 panel/test_panel.py
 doctor.sh
+proxies/test_bridge.py

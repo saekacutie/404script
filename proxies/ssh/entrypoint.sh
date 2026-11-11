@@ -20,8 +20,8 @@ if [ -n "${SSH_USERS_HASHED:-}" ]; then
     PASSWORDS_HASHED=1
 elif [ -z "${SSH_USERS:-}" ]; then
     # No users supplied: create one random account and print it to the logs.
-    RANDOM_USER="saeka-$(</dev/urandom tr -dc 'A-Za-z0-9' | head -c6)"
-    RANDOM_PASS="$(</dev/urandom tr -dc 'A-Za-z0-9' | head -c16)"
+    RANDOM_USER="saeka-$(</dev/urandom tr -dc 'a-z0-9' | head -c6 || true)"
+    RANDOM_PASS="$(</dev/urandom tr -dc 'A-Za-z0-9' | head -c16 || true)"
     SSH_USERS="${RANDOM_USER}:${RANDOM_PASS}"
     echo "[+] No SSH_USERS supplied - generated one-off account:"
     echo "    username: ${RANDOM_USER}"
@@ -29,9 +29,11 @@ elif [ -z "${SSH_USERS:-}" ]; then
     echo "    (shown once - write it down now)"
 fi
 IFS=',' read -ra PAIRS <<< "$SSH_USERS"
+CREATED=0
 for pair in "${PAIRS[@]}"; do
     user="${pair%%:*}"
     pass="${pair#*:}"
+    user="${user,,}"
     [ -z "$user" ] && continue
     if ! [[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
         echo "[!] Skipping invalid username '${user}'"; continue
@@ -39,14 +41,39 @@ for pair in "${PAIRS[@]}"; do
     if [ -z "$pass" ] || [ "$pass" = "$pair" ]; then
         echo "[!] Skipping '${user}' - no password (format user:pass)"; continue
     fi
-    id -u "$user" >/dev/null 2>&1 || useradd -m -s /bin/false "$user"
-    if [ "$PASSWORDS_HASHED" -eq 1 ]; then
-        printf '%s:%s\n' "$user" "$pass" | chpasswd -e
-    else
-        printf '%s:%s\n' "$user" "$pass" | chpasswd
+    if ! id -u "$user" >/dev/null 2>&1; then
+        useradd -m -s /bin/false "$user" || { echo "[!] useradd failed for '$user' - skipping"; continue; }
     fi
+    if [ "$PASSWORDS_HASHED" -eq 1 ]; then
+        printf '%s:%s\n' "$user" "$pass" | chpasswd -e || { echo "[!] chpasswd failed for '$user' - skipping"; continue; }
+    else
+        printf '%s:%s\n' "$user" "$pass" | chpasswd || { echo "[!] chpasswd failed for '$user' - skipping"; continue; }
+    fi
+    CREATED=$((CREATED + 1))
     echo "[+] SSH account ready: $user"
 done
+if [ "$CREATED" -eq 0 ]; then
+    # Never boot without a working login: fall back to one generated account.
+    RANDOM_USER="saeka-$(</dev/urandom tr -dc 'a-z0-9' | head -c6 || true)"
+    RANDOM_PASS="$(</dev/urandom tr -dc 'A-Za-z0-9' | head -c16 || true)"
+    useradd -m -s /bin/false "$RANDOM_USER" && printf '%s:%s\n' "$RANDOM_USER" "$RANDOM_PASS" | chpasswd
+    echo "[!] No valid SSH account in SSH_USERS - generated one-off account:"
+    echo "    username: ${RANDOM_USER}"
+    echo "    password: ${RANDOM_PASS}"
+fi
+
+
+# nginx starts LAST, once every local service accepts connections. Starting it
+# first would let a request arrive while a bridge is still booting (502/503).
+wait_port() {
+    local port="$1" tries="${2:-60}" i
+    for ((i = 0; i < tries; i++)); do
+        (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && return 0
+        sleep 0.25
+    done
+    echo "[!] port ${port} did not come up in time - starting nginx anyway (watchdog keeps retrying)"
+    return 1
+}
 
 start_dropbear() {
     dropbear -F -E -R -w -K 60 -p 127.0.0.1:2200 -b /etc/dropbear/banner.txt &
@@ -102,5 +129,8 @@ echo "[+] Starting watchdog..."
   done
 ) &
 
+wait_port 2200 || true
+wait_port 2222 || true
+[ -z "$OVPN_UPSTREAM_HOST" ] || wait_port 2223 || true
 echo "[+] Starting nginx..."
 exec nginx -g "daemon off;"

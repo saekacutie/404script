@@ -233,6 +233,22 @@ fi
 # /cert: answers 503 unless both OVPN_PROFILE_B64 and users exist
 launch "cert_server" python3 /opt/cert_server.py
 
+# nginx goes up LAST, once the local services accept connections, so no request
+# can arrive while a bridge is still booting (that window is a 502/503).
+wait_port() {
+    local port="$1" i
+    for ((i = 0; i < 60; i++)); do
+        (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && return 0
+        sleep 0.25
+    done
+    warn "port ${port} did not come up in time - starting nginx anyway"
+    return 0
+}
+wait_port 2200
+wait_port 2222
+[ -z "$OVPN_HOST" ] || wait_port 2223
+[ -z "$TCP_HOST" ] || wait_port 2225
+
 launch "nginx" nginx -g 'daemon off;'
 
 echo ""

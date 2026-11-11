@@ -19,6 +19,17 @@ start_cert() {
 BRIDGE_PID=""
 CERT_PID=""
 
+# nginx starts LAST, once the bridge accepts connections (no 502/503 window).
+wait_port() {
+    local port="$1" tries="${2:-60}" i
+    for ((i = 0; i < tries; i++)); do
+        (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && return 0
+        sleep 0.25
+    done
+    echo "[!] port ${port} did not come up in time - starting nginx anyway"
+    return 1
+}
+
 if [ -z "$OVPN_UPSTREAM_HOST" ]; then
     echo "[!] OVPN_UPSTREAM_HOST is not set - /saeka-ovpn disabled."
     echo "[!] Set it to the VM running OpenVPN."
@@ -49,5 +60,6 @@ trap cleanup SIGTERM SIGINT
   done
 ) &
 
+[ -z "$BRIDGE_PID" ] || wait_port 2223 || true
 echo "[+] Starting Nginx..."
 exec nginx -g "daemon off;"

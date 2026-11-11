@@ -51,6 +51,14 @@ def load_users():
     if users:
         return users
 
+    raw_hashed = os.environ.get("SSH_USERS_HASHED", "")
+    for pair in raw_hashed.split(","):
+        user, separator, encoded = pair.strip().partition(":")
+        if separator and user and encoded.startswith("$6$"):
+            users[user.lower()] = encoded
+    if users:
+        return users
+
     raw = os.environ.get("SSH_USERS", "") or os.environ.get("OVPN_USERS", "")
     for pair in raw.split(","):
         user, sep, password = pair.strip().partition(":")

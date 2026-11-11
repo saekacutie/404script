@@ -178,6 +178,64 @@ echo -e "  ${CYAN}PROJECT: ${GREEN}${PROJECT_ID}${RESET}"
 
 warn() { echo -e "  ${YELLOW}$*${RESET}"; }
 
+# ---- helpers shared by the SSH / OVPN / REALITY engines ------------------------
+# (all pipefail-safe: `tr | head -c` would otherwise abort the script via SIGPIPE)
+rand_alnum() { local n="${1:-16}" out; out=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$n" || true); printf '%s' "$out"; }
+clean_user() {  # lower-case, [a-z0-9_-], must start with a letter or _ (what Dropbear/useradd accept)
+    local u; u=$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-' | cut -c1-31)
+    case "$u" in ""|[0-9-]*) u="saeka${u}";; esac
+    printf '%s' "$u"
+}
+hash_pw() { openssl passwd -6 "$1"; }
+json_get() {  # json_get FILE dotted.key  -> value ('' if missing)
+    python3 -I - "$1" "$2" <<'PYEOF' 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."):
+    d = d.get(k, "") if isinstance(d, dict) else ""
+print(d if not isinstance(d, (dict, list)) else "")
+PYEOF
+}
+# Create (or reuse) the companion VM and read the result back. No SSH needed.
+#   auto_vm NAME [deploy_vm.py flags...]  -> fills VM_RESULT (a JSON file path); returns 0 on success
+auto_vm() {
+    local name="$1"; shift
+    VM_RESULT="$(mktemp)"
+    echo -e "  ${CYAN}Creating the VM and configuring it (about 3 minutes)...${RESET}"
+    if python3 -I "${SCRIPT_DIR}/deploy_vm.py" --auto --region "$REGION" --name "$name" --out "$VM_RESULT" "$@"; then
+        return 0
+    fi
+    warn "Automatic VM setup did not finish (see above)."
+    return 1
+}
+ask_ssh_users() {  # fills SSH_USER_LIST (plain, for display) and SSH_HASHED_CSV (what the container gets)
+    SSH_USER_LIST=(); SSH_HASHED_CSV=""
+    local add="y" first=1 uname pw
+    read -r -p "$(echo -e "  ${CYAN}Create an SSH login? [Y/n]: ${RESET}")" add
+    add="${add:-y}"
+    while [[ "$add" =~ ^[Yy] ]]; do
+        read -r -p "$(echo -e "  ${CYAN}Username [saeka]: ${RESET}")" uname
+        uname=$(clean_user "${uname:-saeka}")
+        read -r -p "$(echo -e "  ${CYAN}Password (blank = auto-generate): ${RESET}")" pw
+        if [ -z "$pw" ]; then
+            pw=$(rand_alnum 16)
+            echo -e "  ${GREEN}Generated password for ${uname}: ${pw}${RESET}"
+            echo -e "  ${YELLOW}(shown once - write it down now)${RESET}"
+        fi
+        SSH_USER_LIST+=("${uname}:${pw}")
+        SSH_HASHED_CSV="${SSH_HASHED_CSV:+${SSH_HASHED_CSV},}${uname}:$(hash_pw "$pw")"
+        read -r -p "$(echo -e "  ${CYAN}Add another? [y/N]: ${RESET}")" add
+    done
+    if [ "${#SSH_USER_LIST[@]}" -eq 0 ]; then
+        uname="saeka"; pw=$(rand_alnum 16)
+        echo -e "  ${GREEN}No login chosen - created ${uname} / ${pw}${RESET}"
+        echo -e "  ${YELLOW}(shown once - write it down now)${RESET}"
+        SSH_USER_LIST+=("${uname}:${pw}")
+        SSH_HASHED_CSV="${uname}:$(hash_pw "$pw")"
+    fi
+    SSH_USERS_CSV=$(IFS=,; echo "${SSH_USER_LIST[*]}")
+}
+
 run_quiet() {
     local label="$1" logfile="$2"
     shift 2
@@ -698,7 +756,8 @@ if [ "$build_ok" -ne 1 ]; then
     exit 1
 fi
 
-SSH_USERS_CSV=""
+SSH_USERS_CSV=""; SSH_HASHED_CSV=""; SSH_USER_LIST=()
+OVPN_HOST=""; OVPN_PORT=1194; OVPN_PROFILE=""
 if [ "$PROXY_ENV" == "ssh" ]; then
     echo -e "  ${CYAN}==================================================${RESET}"
     echo -e "  ${GREEN}           SSH GATEWAY - TUNNEL USERS${RESET}"
@@ -706,41 +765,60 @@ if [ "$PROXY_ENV" == "ssh" ]; then
     echo -e "  ${YELLOW}Path: /saeka-ssh (fake-WS-handshake + raw passthrough, matching${RESET}"
     echo -e "  ${YELLOW}HTTP Injector / NPV Tunnel style clients - not real RFC6455 WS).${RESET}"
     echo ""
-    SSH_USER_LIST=()
-    read -r -p "$(echo -e "  ${CYAN}Add an SSH user? [y/N]: ${RESET}")" ADD_SSH
-    while [[ "$ADD_SSH" =~ ^[Yy] ]]; do
-        read -r -p "$(echo -e "  ${CYAN}Username [saeka]: ${RESET}")" SSH_UNAME
-        SSH_UNAME=$(printf '%s' "${SSH_UNAME:-saeka}" | tr -dc 'A-Za-z0-9_-')
-        read -r -p "$(echo -e "  ${CYAN}Password (blank = auto-generate): ${RESET}")" SSH_PW
-        if [ -z "$SSH_PW" ]; then
-            SSH_PW=$(< /dev/urandom tr -dc 'A-Za-z0-9' | head -c16)
-            echo -e "  ${GREEN}Generated password for ${SSH_UNAME}: ${SSH_PW}${RESET}"
-            echo -e "  ${YELLOW}(shown once - write it down now)${RESET}"
+    ask_ssh_users
+    echo ""
+    read -r -p "$(echo -e "  ${CYAN}Add OpenVPN too (a VM is created automatically)? [y/N]: ${RESET}")" WANT_OVPN
+    if [[ "${WANT_OVPN:-n}" =~ ^[Yy] ]]; then
+        if auto_vm "${SERVICE_NAME}-vm" --no-reality --ovpn-port 1194; then
+            OVPN_HOST=$(json_get "$VM_RESULT" ip)
+            OVPN_PORT=$(json_get "$VM_RESULT" openvpn.port); OVPN_PORT=${OVPN_PORT:-1194}
+            OVPN_PROFILE=$(json_get "$VM_RESULT" openvpn.profile_b64)
+            echo -e "  ${GREEN}OpenVPN VM ready at ${OVPN_HOST}:${OVPN_PORT}${RESET}"
+        else
+            read -r -p "$(echo -e "  ${CYAN}Existing OpenVPN VM IP (blank = skip OpenVPN): ${RESET}")" OVPN_HOST
+            OVPN_HOST=$(printf '%s' "$OVPN_HOST" | tr -cd 'A-Za-z0-9.-')
         fi
-        SSH_USER_LIST+=("${SSH_UNAME}:${SSH_PW}")
-        read -r -p "$(echo -e "  ${CYAN}Add another? [y/N]: ${RESET}")" ADD_SSH
-    done
-    if [ "${#SSH_USER_LIST[@]}" -gt 0 ]; then
-        SSH_USERS_CSV=$(IFS=,; echo "${SSH_USER_LIST[*]}")
+        rm -f "${VM_RESULT:-}"
     fi
     echo ""
-    ENV_VARS="^@^SSH_USERS=${SSH_USERS_CSV}"
+    ENV_VARS="^@^SSH_USERS_HASHED=${SSH_HASHED_CSV}"
+    if [ -n "$OVPN_HOST" ]; then
+        ENV_VARS="${ENV_VARS}@OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
+        [ -z "$OVPN_PROFILE" ] || ENV_VARS="${ENV_VARS}@OVPN_PROFILE_B64=${OVPN_PROFILE}"
+    fi
 elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     echo -e "  ${CYAN}==================================================${RESET}"
-    echo -e "  ${GREEN}           OVPN RELAY - UPSTREAM VM${RESET}"
+    echo -e "  ${GREEN}        OVPN - CLOUD RUN + VM IP COMBINED${RESET}"
     echo -e "  ${CYAN}==================================================${RESET}"
-    echo -e "  ${YELLOW}This does NOT run OpenVPN itself - it forwards /saeka-ovpn to a${RESET}"
-    echo -e "  ${YELLOW}real OpenVPN server on a VM (see deploy_vm.py). Deploy that VM${RESET}"
-    echo -e "  ${YELLOW}FIRST and have its static IP ready.${RESET}"
+    echo -e "  ${YELLOW}Cloud Run is the entry; it relays /saeka-ovpn to a real OpenVPN${RESET}"
+    echo -e "  ${YELLOW}server on a VM. The VM is created and configured for you, the two${RESET}"
+    echo -e "  ${YELLOW}are connected automatically, and /cert serves your .ovpn profile.${RESET}"
     echo ""
-    read -r -p "$(echo -e "  ${CYAN}OpenVPN VM static IP: ${RESET}")" OVPN_HOST
-    read -r -p "$(echo -e "  ${CYAN}OpenVPN port [1194]: ${RESET}")" OVPN_PORT
-    OVPN_PORT=${OVPN_PORT:-1194}
-    if [ -z "$OVPN_HOST" ]; then
-        echo -e "  ${RED}No IP given - the relay will start but every connection will fail.${RESET}"
+    OVPN_PORT=1194
+    read -r -p "$(echo -e "  ${CYAN}Create the OpenVPN VM automatically? [Y/n]: ${RESET}")" VM_AUTO
+    if ! [[ "${VM_AUTO:-y}" =~ ^[Nn] ]]; then
+        if auto_vm "${SERVICE_NAME}-vm" --no-reality --ovpn-port 1194; then
+            OVPN_HOST=$(json_get "$VM_RESULT" ip)
+            OVPN_PORT=$(json_get "$VM_RESULT" openvpn.port); OVPN_PORT=${OVPN_PORT:-1194}
+            OVPN_PROFILE=$(json_get "$VM_RESULT" openvpn.profile_b64)
+            echo -e "  ${GREEN}OpenVPN VM ready at ${OVPN_HOST}:${OVPN_PORT}${RESET}"
+        fi
+        rm -f "${VM_RESULT:-}"
     fi
+    if [ -z "$OVPN_HOST" ]; then
+        read -r -p "$(echo -e "  ${CYAN}OpenVPN VM static IP or hostname (blank = none yet): ${RESET}")" OVPN_HOST
+        OVPN_HOST=$(printf '%s' "$OVPN_HOST" | tr -cd 'A-Za-z0-9.-')
+        read -r -p "$(echo -e "  ${CYAN}OpenVPN port [1194]: ${RESET}")" OVPN_PORT
+        OVPN_PORT=$(printf '%s' "${OVPN_PORT:-1194}" | tr -cd '0-9'); OVPN_PORT=${OVPN_PORT:-1194}
+    fi
+    if [ -z "$OVPN_HOST" ]; then
+        echo -e "  ${RED}No VM address - the relay starts but every connection will fail.${RESET}"
+    fi
+    echo -e "  ${CYAN}Login for the profile download (/cert):${RESET}"
+    ask_ssh_users
     echo ""
-    ENV_VARS="^@^OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
+    ENV_VARS="^@^OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}@CERT_USERS_HASHED=${SSH_HASHED_CSV}"
+    [ -z "$OVPN_PROFILE" ] || ENV_VARS="${ENV_VARS}@OVPN_PROFILE_B64=${OVPN_PROFILE}"
 elif [ "$PROXY_ENV" == "reality" ]; then
     echo -e "  ${CYAN}==================================================${RESET}"
     echo -e "  ${GREEN}        REALITY COMBO - CLOUD RUN + VM IP${RESET}"
@@ -749,53 +827,45 @@ elif [ "$PROXY_ENV" == "reality" ]; then
     echo -e "  ${YELLOW}IP where Xray VLESS+REALITY listens. This script creates and${RESET}"
     echo -e "  ${YELLOW}configures that VM for you (Compute Engine, ~3 minutes).${RESET}"
     echo ""
-    TCP_HOST=""; TCP_PORT=443; OVPN_PORT=""; REALITY_LINK=""; REALITY_NAMES=""
+    TCP_HOST=""; TCP_PORT=443; REALITY_LINK=""; REALITY_NAMES=""
     VM_NAME="${SERVICE_NAME}-vm"
     read -r -p "$(echo -e "  ${CYAN}Create the REALITY VM automatically? [Y/n]: ${RESET}")" VM_AUTO
     if ! [[ "${VM_AUTO:-y}" =~ ^[Nn] ]]; then
         read -r -p "$(echo -e "  ${CYAN}REALITY server name [www.microsoft.com]: ${RESET}")" R_SNI
         R_SNI=$(printf '%s' "${R_SNI:-www.microsoft.com}" | tr -cd 'A-Za-z0-9.,-')
-        VM_JSON="$(mktemp)"
-        echo -e "  ${CYAN}Creating the VM and configuring REALITY (this takes a few minutes)...${RESET}"
-        if python3 -I "${SCRIPT_DIR}/deploy_vm.py" --auto --region "$REGION" --name "$VM_NAME" \
-                --reality-port 443 --sni "$R_SNI" --out "$VM_JSON"; then
-            eval "$(python3 -I - "$VM_JSON" <<'PYEOF'
-import json, shlex, sys
-d = json.load(open(sys.argv[1]))
-r = d.get("reality", {})
-print("TCP_HOST=%s" % shlex.quote(d.get("ip", "")))
-print("TCP_PORT=%s" % shlex.quote(str(r.get("port", 443))))
-print("REALITY_LINK=%s" % shlex.quote(r.get("link", "")))
-print("REALITY_NAMES=%s" % shlex.quote(",".join(r.get("serverNames", []))))
-PYEOF
-)"
-            echo -e "  ${GREEN}REALITY VM ready at ${TCP_HOST}:${TCP_PORT}${RESET}"
-        else
-            warn "Automatic VM setup did not finish - you can enter an existing VM address instead."
+        read -r -p "$(echo -e "  ${CYAN}Also run OpenVPN on the same VM? [y/N]: ${RESET}")" WANT_OVPN
+        VM_FLAGS=(--reality-port 443 --sni "$R_SNI")
+        [[ "${WANT_OVPN:-n}" =~ ^[Yy] ]] && VM_FLAGS+=(--ovpn-port 1194)
+        if auto_vm "$VM_NAME" "${VM_FLAGS[@]}"; then
+            TCP_HOST=$(json_get "$VM_RESULT" ip)
+            TCP_PORT=$(json_get "$VM_RESULT" reality.port); TCP_PORT=${TCP_PORT:-443}
+            REALITY_LINK=$(json_get "$VM_RESULT" reality.link)
+            REALITY_NAMES=$(python3 -I -c 'import json,sys; print(",".join(json.load(open(sys.argv[1])).get("reality",{}).get("serverNames",[])))' "$VM_RESULT" 2>/dev/null || true)
+            if [[ "${WANT_OVPN:-n}" =~ ^[Yy] ]] && [ "$(json_get "$VM_RESULT" openvpn.enabled)" = "True" ]; then
+                OVPN_HOST="$TCP_HOST"; OVPN_PORT=$(json_get "$VM_RESULT" openvpn.port); OVPN_PORT=${OVPN_PORT:-1194}
+                OVPN_PROFILE=$(json_get "$VM_RESULT" openvpn.profile_b64)
+            fi
+            echo -e "  ${GREEN}VM ready at ${TCP_HOST}:${TCP_PORT}${RESET}"
         fi
-        rm -f "$VM_JSON"
+        rm -f "${VM_RESULT:-}"
     fi
     if [ -z "$TCP_HOST" ]; then
         read -r -p "$(echo -e "  ${CYAN}VM static IP or hostname (blank = none yet): ${RESET}")" TCP_HOST
         TCP_HOST=$(printf '%s' "$TCP_HOST" | tr -cd 'A-Za-z0-9.-')
         read -r -p "$(echo -e "  ${CYAN}REALITY port on the VM [443]: ${RESET}")" TCP_PORT
-        TCP_PORT=$(printf '%s' "${TCP_PORT:-443}" | tr -cd '0-9')
-        [ -n "$TCP_PORT" ] || TCP_PORT=443
+        TCP_PORT=$(printf '%s' "${TCP_PORT:-443}" | tr -cd '0-9'); TCP_PORT=${TCP_PORT:-443}
     fi
-    read -r -p "$(echo -e "  ${CYAN}SSH username [saeka]: ${RESET}")" SSH_UNAME
-    SSH_UNAME=$(printf '%s' "${SSH_UNAME:-saeka}" | tr -dc 'a-z0-9_-')
-    read -r -p "$(echo -e "  ${CYAN}SSH password (blank = auto-generate): ${RESET}")" SSH_PW
-    if [ -z "$SSH_PW" ]; then
-        SSH_PW=$(< /dev/urandom tr -dc 'A-Za-z0-9' | head -c16 || true)
-        echo -e "  ${GREEN}Generated password for ${SSH_UNAME}: ${SSH_PW}${RESET}"
-        echo -e "  ${YELLOW}(shown once - write it down now)${RESET}"
-    fi
-    SSH_PW=$(printf '%s' "$SSH_PW" | tr -d '@,:')
+    echo ""
+    ask_ssh_users
     if [ -z "$TCP_HOST" ]; then
         echo -e "  ${RED}No VM address - the relay starts but /saeka-tcp will not connect.${RESET}"
     fi
     echo ""
-    ENV_VARS="^@^SSH_USERS=${SSH_UNAME}:${SSH_PW}@TCP_UPSTREAM_HOST=${TCP_HOST}@TCP_UPSTREAM_PORT=${TCP_PORT}"
+    ENV_VARS="^@^SSH_USERS_HASHED=${SSH_HASHED_CSV}@TCP_UPSTREAM_HOST=${TCP_HOST}@TCP_UPSTREAM_PORT=${TCP_PORT}"
+    if [ -n "$OVPN_HOST" ]; then
+        ENV_VARS="${ENV_VARS}@OVPN_UPSTREAM_HOST=${OVPN_HOST}@OVPN_UPSTREAM_PORT=${OVPN_PORT}"
+        [ -z "$OVPN_PROFILE" ] || ENV_VARS="${ENV_VARS}@OVPN_PROFILE_B64=${OVPN_PROFILE}"
+    fi
 else
     # ------------------------------------------------------------------
     # SAEKA PANEL (served at the service root by every Xray engine above).
@@ -948,6 +1018,59 @@ fi
 echo -e "  ${CYAN}CPU / RAM  ${GREEN}${CPU} vCPU / ${RAM}${RESET}"
 echo ""
 
+# ---- standalone gateways: prove the tunnel path really answers (no silent 503) ---
+GATEWAY_FAIL=0
+gateway_code() {  # HTTP status of a real Upgrade handshake against $1 (101 = tunnel is open)
+    curl -s -o /dev/null -w '%{http_code}' --max-time 4 --http1.1 \
+        -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+        -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Sec-WebSocket-Version: 13' \
+        "https://${CLEAN_HOST}$1" 2>/dev/null || true
+}
+check_gateway_path() {  # check_gateway_path PATH WHAT
+    local path="$1" what="$2" code="" i
+    for i in $(seq 1 15); do                      # a cold start can take ~30-60s
+        code=$(gateway_code "$path")
+        [ "$code" = "101" ] && break
+        sleep 4
+    done
+    if [ "$code" = "101" ]; then
+        echo -e "  ${GREEN}CHECK  ${path}  -> 101 tunnel open (${what})${RESET}"
+        return 0
+    fi
+    GATEWAY_FAIL=1
+    echo -e "  ${RED}CHECK  ${path}  -> HTTP ${code:-none} (${what})${RESET}"
+    case "$code" in
+        502) echo -e "  ${YELLOW}         502 = Cloud Run is fine but cannot reach the target. For the VM paths that${RESET}"
+             echo -e "  ${YELLOW}         means the VM port/firewall; for /saeka-ssh the container's SSH server.${RESET}";;
+        503) echo -e "  ${YELLOW}         503 = Cloud Run has no healthy instance. The container log below says why.${RESET}";;
+        000|"") echo -e "  ${YELLOW}         no answer at all - the service is not reachable from this shell.${RESET}";;
+    esac
+    return 1
+}
+if [ "$STANDALONE" -eq 1 ]; then
+    echo -e "  ${CYAN}Verifying the tunnel paths (a real HTTP-Upgrade handshake)...${RESET}"
+    for _ in $(seq 1 15); do
+        [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "https://${CLEAN_HOST}/health" 2>/dev/null || true)" = "200" ] && break
+        sleep 4
+    done
+    case "$PROXY_ENV" in
+        ssh)        check_gateway_path /saeka-ssh "SSH over WS" || true
+                    [ -z "${OVPN_HOST:-}" ] || check_gateway_path /saeka-ovpn "OpenVPN on ${OVPN_HOST}" || true;;
+        ovpn-relay) check_gateway_path /saeka-ovpn "OpenVPN on ${OVPN_HOST:-?}" || true;;
+        reality)    check_gateway_path /saeka-ssh "SSH over WS" || true
+                    [ -z "${TCP_HOST:-}" ] || check_gateway_path /saeka-tcp "REALITY on ${TCP_HOST}:${TCP_PORT}" || true
+                    [ -z "${OVPN_HOST:-}" ] || check_gateway_path /saeka-ovpn "OpenVPN on ${OVPN_HOST}" || true;;
+    esac
+    if [ "$GATEWAY_FAIL" -ne 0 ]; then
+        echo ""
+        echo -e "  ${YELLOW}Last container log lines:${RESET}"
+        gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE_NAME}\"" \
+            --project="$PROJECT_ID" --limit=30 --freshness=15m --format='value(textPayload)' 2>/dev/null \
+            | grep -v '^$' | head -n 30 | tac | cut -c1-200 | sed 's/^/    /' || true
+    fi
+    echo ""
+fi
+
 if [ "$STANDALONE" -eq 0 ]; then
     PANEL_URL="https://${CLEAN_HOST}"
     PANEL_UP="no"
@@ -1041,27 +1164,30 @@ if [ "$PROXY_ENV" == "ssh" ]; then
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
     echo -e "  ${GREEN}Path: /saeka-ssh${RESET}  (fake-handshake WS, not real RFC6455 -"
     echo -e "  matches HTTP Injector / NPV Tunnel style clients)"
-    if [ -n "$SSH_USERS_CSV" ]; then
-        echo -e "  ${CYAN}Users configured: ${GREEN}$(echo "$SSH_USERS_CSV" | tr ',' '\n' | cut -d: -f1 | paste -sd, -)${RESET}"
-    else
-        echo -e "  ${YELLOW}No users were added - a one-off random account was generated in${RESET}"
-        echo -e "  ${YELLOW}the container logs (won't survive a redeploy). Re-run and add one.${RESET}"
-    fi
+    echo -e "  ${CYAN}Users configured: ${GREEN}$(echo "$SSH_USERS_CSV" | tr ',' '\n' | cut -d: -f1 | paste -sd, -)${RESET}"
     echo -e "  ${CYAN}Point your SSH-over-WS client at:${RESET}"
     echo -e "  ${CYAN}  wss://${CLEAN_HOST}/saeka-ssh${RESET}"
+    if [ -n "$OVPN_HOST" ]; then
+        echo -e "  ${GREEN}Optional OpenVPN${RESET}  /saeka-ovpn -> ${OVPN_HOST}:${OVPN_PORT} (VM created by this script)"
+        echo -e "  ${CYAN}  wss://${CLEAN_HOST}/saeka-ovpn${RESET}"
+        [ -z "$OVPN_PROFILE" ] || echo -e "  ${CYAN}  profile: https://${CLEAN_HOST}/cert  (log in with the SSH user above)${RESET}"
+    fi
 elif [ "$PROXY_ENV" == "ovpn-relay" ]; then
     echo -e "  ${CYAN}                  OVPN RELAY${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
-    echo -e "  ${GREEN}Path: /saeka-ovpn${RESET}  -> forwards to ${OVPN_HOST}:${OVPN_PORT}"
-    echo -e "  ${YELLOW}This is only useful once that VM is actually running OpenVPN${RESET}"
-    echo -e "  ${YELLOW}(deploy_vm.py). This service does not run OpenVPN itself.${RESET}"
+    echo -e "  ${GREEN}Path: /saeka-ovpn${RESET}  -> Cloud Run first, then ${OVPN_HOST:-<no VM>}:${OVPN_PORT} (OpenVPN)"
     echo -e "  ${CYAN}Point your client-side WS wrapper at:${RESET}"
     echo -e "  ${CYAN}  wss://${CLEAN_HOST}/saeka-ovpn${RESET}"
+    if [ -n "$OVPN_PROFILE" ]; then
+        echo -e "  ${CYAN}Profile download: ${GREEN}https://${CLEAN_HOST}/cert${RESET}"
+        echo -e "  ${CYAN}  login: ${GREEN}$(echo "$SSH_USERS_CSV" | tr ',' '\n' | cut -d: -f1 | paste -sd, -)${RESET} (password shown earlier)"
+    fi
 elif [ "$PROXY_ENV" == "reality" ]; then
     echo -e "  ${CYAN}                  REALITY COMBO${RESET}"
     echo -e "  ${YELLOW}------------------------------------------------------------${RESET}"
     echo -e "  ${GREEN}Path: /saeka-tcp${RESET}   -> ${TCP_HOST:-<no VM>}:${TCP_PORT}  (REALITY on the VM)"
-    echo -e "  ${GREEN}Path: /saeka-ssh${RESET}   -> SSH on Cloud Run (user ${SSH_UNAME})"
+    echo -e "  ${GREEN}Path: /saeka-ssh${RESET}   -> SSH on Cloud Run (user $(echo "$SSH_USERS_CSV" | tr ',' '\n' | cut -d: -f1 | paste -sd, -))"
+    [ -z "$OVPN_HOST" ] || echo -e "  ${GREEN}Path: /saeka-ovpn${RESET}  -> ${OVPN_HOST}:${OVPN_PORT} (OpenVPN on the VM; profile at https://${CLEAN_HOST}/cert)"
     echo -e "  ${CYAN}Entry:  wss://${CLEAN_HOST}/saeka-tcp   (Cloud Run first, then the VM IP)${RESET}"
     if [ -n "${REALITY_LINK:-}" ]; then
         echo -e "  ${CYAN}REALITY link (VM ${TCP_HOST}):${RESET}"
@@ -1091,7 +1217,7 @@ echo ""
 FINAL_HOST="$CLEAN_HOST"
 
 echo -e "  ${CYAN}==================================================${RESET}"
-echo -e "  ${GREEN}       CUSTOM DOMAIN & UNIVERSAL SNI MANAGER${RESET}"
+echo -e "  ${GREEN}   CUSTOM DOMAIN, UNIVERSAL SNI & GOOGLE CDN (works for every engine)${RESET}"
 echo -e "  ${CYAN}==================================================${RESET}"
 echo -e "  ${YELLOW}Google Managed Certs take 15-60 mins. To bypass the wait, you have options:${RESET}"
 echo -e "  ${WHITE}1) Enter a Domain : ${YELLOW}Auto-generates Google cert (Stacks all past domains. Takes up to 1 hr)${RESET}"
@@ -1149,14 +1275,27 @@ if [ -n "$LB_INPUT" ]; then
                 --cloud-run-service="$SERVICE_NAME" --project="$PROJECT_ID" || lb_setup_failed=1
     fi
 
+    # Google Cloud CDN is switched on for the backend. USE_ORIGIN_HEADERS means only
+    # responses that explicitly say "public, max-age" are cached, so tunnels, logins
+    # and APIs are never cached - they simply ride Google's edge network.
+    CDN_FLAGS=(--enable-cdn --cache-mode=USE_ORIGIN_HEADERS --timeout=3600)
     if ! gcloud compute backend-services describe "$BACKEND_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
-        run_quiet "Creating backend service" lb.log \
-            gcloud compute backend-services create "$BACKEND_NAME" --global --project="$PROJECT_ID" || lb_setup_failed=1
+        run_quiet "Creating backend service (Cloud CDN on)" lb.log \
+            gcloud compute backend-services create "$BACKEND_NAME" --global "${CDN_FLAGS[@]}" --project="$PROJECT_ID" || lb_setup_failed=1
         run_quiet "Attaching NEG to backend" lb.log \
             gcloud compute backend-services add-backend "$BACKEND_NAME" --global \
                 --network-endpoint-group="$NEG_NAME" --network-endpoint-group-region="$REGION" \
                 --project="$PROJECT_ID" || lb_setup_failed=1
     fi
+
+    CDN_STATE="on"
+    if ! run_quiet "Enabling Cloud CDN + long timeout on the backend" lb-cdn.log \
+            gcloud compute backend-services update "$BACKEND_NAME" --global "${CDN_FLAGS[@]}" --project="$PROJECT_ID"; then
+        # Older gcloud / a policy may refuse a flag; fall back to CDN alone.
+        gcloud compute backend-services update "$BACKEND_NAME" --global --enable-cdn --project="$PROJECT_ID" >/dev/null 2>&1 \
+            && CDN_STATE="on (default cache mode)" || CDN_STATE="not enabled"
+    fi
+    rm -f lb-cdn.log
 
     if ! gcloud compute url-maps describe "$URLMAP_NAME" --global --project="$PROJECT_ID" >/dev/null 2>&1; then
         run_quiet "Creating URL map" lb.log \
@@ -1238,6 +1377,7 @@ if [ -n "$LB_INPUT" ]; then
         echo ""
         echo -e "  ${GREEN}Load Balancer ready.${RESET}"
         echo -e "  ${CYAN}STATIC IP: ${GREEN}${STATIC_IP}${RESET}"
+        echo -e "  ${CYAN}GOOGLE CDN: ${GREEN}${CDN_STATE}${RESET}  ${YELLOW}(Google edge network; tunnels are never cached)${RESET}"
         if [ "$LB_INPUT" == "UNIVERSAL" ]; then
             echo -e "  ${YELLOW}Universal Mode active. Use ANY domain or IP directly.${RESET}"
             echo -e "  ${YELLOW}Client apps MUST have 'allowInsecure' set to true - that also means${RESET}"
